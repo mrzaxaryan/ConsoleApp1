@@ -91,7 +91,6 @@ unsafe class Program
                 Console.WriteLine("GetThreadContext failed with error: " + GetLastError());
                 return;
             }
-            Console.WriteLine("Start addressing code at: 0x" + ((ulong)g_codeAddress).ToString("X16"));
             // Set hardware breakpoint at start of our code
             pCtx->Dr0 = (ulong)g_codeAddress;
             pCtx->Dr7 = 0x1ul; // Enable DR0 (execute breakpoint, 1-byte length)
