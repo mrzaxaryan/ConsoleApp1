@@ -77,7 +77,7 @@ public static unsafe class X64Emulator
                     result = HandleCmpAlImm8(ctx, address, Log); break;
                 // ... keep other cases as-is for now ...
                 default:
-                    Log($"Unsupported opcode 0x{*address:X2}", 2);
+                    Log($"Unsupported opcode 0x{*address:X2}", 32);
                     result = false;
                     break;
             }
