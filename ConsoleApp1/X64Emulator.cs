@@ -31,11 +31,6 @@ public static unsafe class X64Emulator
         return string.Join(" ", bytes.Select(b => $"{b:X2}"));
     }
 
-    private static void LogRegisters(CONTEXT* ctx, string prefix = "[REGS]")
-    {
-        //Console.WriteLine($"{prefix} RSP=0x{ctx->Rsp:X} RAX=0x{ctx->Rax:X} RBX=0x{ctx->Rbx:X} RCX=0x{ctx->Rcx:X} RDX=0x{ctx->Rdx:X} RBP=0x{ctx->Rbp:X} RSI=0x{ctx->Rsi:X} RDI=0x{ctx->Rdi:X} R8=0x{ctx->R8:X} R9=0x{ctx->R9:X} R10=0x{ctx->R10:X} R11=0x{ctx->R11:X} R12=0x{ctx->R12:X} R13=0x{ctx->R13:X} R14=0x{ctx->R14:X} R15=0x{ctx->R15:X} EFlags=0x{ctx->EFlags:X}");
-    }
-
     private struct RegSnapshot
     {
         public ulong Rax, Rbx, Rcx, Rdx, Rsp, Rbp, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15;
@@ -71,7 +66,6 @@ public static unsafe class X64Emulator
         ctx->Rsp += 8;
         Log($"RET => RIP=0x{returnAddress:X}", 1);
         ctx->Rip = returnAddress;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -81,7 +75,6 @@ public static unsafe class X64Emulator
         ulong target = (ulong)((long)ctx->Rip + 2 + rel8);
         Log($"JMP short 0x{target:X}", 2);
         ctx->Rip = target;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -108,7 +101,6 @@ public static unsafe class X64Emulator
         ((uint*)(&ctx->Rax))[reg] = value;
         Log($"MOVZX R{reg}, r/m8 => R{reg}=0x{value:X2}", instrLen);
         ctx->Rip += (ulong)instrLen;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -122,7 +114,6 @@ public static unsafe class X64Emulator
         ctx->EFlags = (uint)((ctx->EFlags & ~0x85) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
         Log($"CMP AL, 0x{imm8:X2}", 2);
         ctx->Rip += 2;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -133,7 +124,6 @@ public static unsafe class X64Emulator
         ulong target = (ulong)((long)ctx->Rip + 2 + rel8);
         Log($"JNE short 0x{target:X} {(zf ? "NOT taken" : "TAKEN")}", 2);
         ctx->Rip = zf ? ctx->Rip + 2 : target;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -231,7 +221,6 @@ public static unsafe class X64Emulator
 
         Log($"SUB QWORD PTR [0x{memAddr:X}], 0x{imm8:X2} => 0x{orig:X}-0x{imm8:X}=0x{result:X}", offs);
         ctx->Rip += (ulong)offs;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -366,7 +355,6 @@ public static unsafe class X64Emulator
             *dst = old + imm8;
             Log($"ADD R{rm}, 0x{imm8:X2} => 0x{old:X}+0x{imm8:X}=0x{*dst:X}", offs);
             ctx->Rip += (ulong)offs;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         else
@@ -418,7 +406,6 @@ public static unsafe class X64Emulator
 
             Log($"ADD QWORD PTR [0x{memAddr:X}], 0x{imm8:X2} => 0x{oldVal:X}+0x{imm8:X}=0x{newVal:X}", offs);
             ctx->Rip += (ulong)offs;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
     }
@@ -493,7 +480,6 @@ public static unsafe class X64Emulator
         ctx->EFlags = (uint)((ctx->EFlags & ~0x85) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
         Log($"ADD r/m8, r8 => [0x{(ulong)destPtr:X}]=0x{result:X2}", offs);
         ctx->Rip += (ulong)offs;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -507,7 +493,6 @@ public static unsafe class X64Emulator
         bool taken = cf || zf;
         Log($"JBE short 0x{target:X} {(taken ? "TAKEN" : "NOT taken")}", 2);
         ctx->Rip = taken ? target : ctx->Rip + 2;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -515,7 +500,6 @@ public static unsafe class X64Emulator
     {
         Log("NOP", 1);
         ctx->Rip += 1;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -525,7 +509,6 @@ public static unsafe class X64Emulator
         ctx->Rsp -= 8;
         *(ulong*)ctx->Rsp = ctx->Rbp;
         ctx->Rip += 1;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -535,7 +518,6 @@ public static unsafe class X64Emulator
         ctx->Rsp -= 8;
         *(ulong*)ctx->Rsp = ctx->Rdi;
         ctx->Rip += 1;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
     private static bool HandlePushRsi(CONTEXT* ctx, Action<string, int> Log)
@@ -544,7 +526,6 @@ public static unsafe class X64Emulator
         ctx->Rsp -= 8;
         *(ulong*)ctx->Rsp = ctx->Rsi;
         ctx->Rip += 1;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
     private static bool HandlePushRbx(CONTEXT* ctx, Action<string, int> Log)
@@ -553,7 +534,6 @@ public static unsafe class X64Emulator
         ctx->Rsp -= 8;
         *(ulong*)ctx->Rsp = ctx->Rbx;
         ctx->Rip += 1;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
 
@@ -575,7 +555,6 @@ public static unsafe class X64Emulator
             Log("MOV RBP, RSP", 3);
             ctx->Rbp = ctx->Rsp;
             ctx->Rip += 3;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         if (op2 == 0x83 && op3 == 0xEC) // 48 83 EC imm8 → SUB RSP, imm8
@@ -584,7 +563,6 @@ public static unsafe class X64Emulator
             ctx->Rsp -= imm8;
             Log($"SUB RSP, 0x{imm8:X2} => new RSP=0x{ctx->Rsp:X}", 4);
             ctx->Rip += 4;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         // --- generic: REX.W + 81 /r  => Group1 (imm32 sign-extended) on r/m64 ---
@@ -616,8 +594,8 @@ public static unsafe class X64Emulator
                 ulong baseVal;
                 if (modLocal == 0b00 && baseBits == 0b101)
                 {
-                    int disp32s = *(int*)(address + offsLocal); offsLocal += 4;
-                    baseVal = (ulong)(long)disp32s;
+                    int disp32 = *(int*)(address + offsLocal); offsLocal += 4;
+                    baseVal = (ulong)(long)disp32;
                 }
                 else
                 {
@@ -701,7 +679,7 @@ public static unsafe class X64Emulator
                     Log($"ADD QWORD PTR [0x{memAddr:X}], 0x{(uint)imm32:X8} => 0x{old:X}+0x{uimm:X}=0x{nw:X}", offs);
                 }
                 // (Optional) set ZF/SF if you need them; you’ve been selective so far.
-                ctx->Rip += (ulong)offs; LogRegisters(ctx, "[AFTER]"); return true;
+                ctx->Rip += (ulong)offs; return true;
             }
             else if (grp == 5) // SUB
             {
@@ -715,7 +693,7 @@ public static unsafe class X64Emulator
                     ulong old = *(ulong*)memAddr; ulong nw = old - uimm; *(ulong*)memAddr = nw;
                     Log($"SUB QWORD PTR [0x{memAddr:X}], 0x{(uint)imm32:X8} => 0x{old:X}-0x{uimm:X}=0x{nw:X}", offs);
                 }
-                ctx->Rip += (ulong)offs; LogRegisters(ctx, "[AFTER]"); return true;
+                ctx->Rip += (ulong)offs; return true;
             }
             else if (grp == 7) // CMP
             {
@@ -732,7 +710,7 @@ public static unsafe class X64Emulator
                 else
                     Log($"CMP QWORD PTR [0x{memAddr:X}], 0x{(uint)imm32:X8} => (mem=0x{lhs:X})", offs);
 
-                ctx->Rip += (ulong)offs; LogRegisters(ctx, "[AFTER]"); return true;
+                ctx->Rip += (ulong)offs; return true;
             }
 
             Log($"Unsupported 48 81 /{grp} form", offs);
@@ -775,7 +753,8 @@ public static unsafe class X64Emulator
                 if (modLocal == 0b00 && baseBits == 0b101)
                 {
                     // no base, disp32 only
-                    int disp32 = *(int*)(address + offsLocal); offsLocal += 4;
+                    int disp32 = *(int*)(address + offsLocal);
+                    offsLocal += 4;
                     baseVal = (ulong)(long)disp32;
                 }
                 else
@@ -784,11 +763,12 @@ public static unsafe class X64Emulator
                 }
 
                 ulong indexVal = 0;
-                if (idxBits != 0b100)
+                if (idxBits != 0b100) // 0b100 => no index, REX.X ignored
                 {
                     indexVal = *((&ctx->Rax) + indexReg);
-                    indexVal <<= scaleBits; // 1<<scaleBits
+                    indexVal <<= scaleBits; // scale = 1<<scaleBits
                 }
+
                 return baseVal + indexVal;
             }
 
@@ -801,7 +781,6 @@ public static unsafe class X64Emulator
                 *dst = (ulong)(long)imm32;
                 Log($"MOV R{rm}, 0x{imm32:X8} (sext) => R{rm}=0x{*dst:X}", offs);
                 ctx->Rip += (ulong)offs;
-                LogRegisters(ctx, "[AFTER]");
                 return true;
             }
             else
@@ -862,7 +841,6 @@ public static unsafe class X64Emulator
 
                 Log($"MOV QWORD PTR [0x{memAddr:X}], 0x{imm32m:X8} (sext) => [mem]=0x{val:X}", offs);
                 ctx->Rip += (ulong)offs;
-                LogRegisters(ctx, "[AFTER]");
                 return true;
             }
         }
@@ -873,7 +851,6 @@ public static unsafe class X64Emulator
             ctx->Rsp &= 0xFFFFFFFFFFFFFF00UL | (ulong)imm8;
             Log($"AND RSP, 0x{imm8:X2} => new RSP=0x{ctx->Rsp:X}", 4);
             ctx->Rip += 4;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         if (op2 == 0x81 && op3 == 0xEC)      // 48 81 EC imm32 -> SUB RSP, imm32
@@ -882,7 +859,6 @@ public static unsafe class X64Emulator
             ctx->Rsp -= imm32;
             Log($"SUB RSP, 0x{imm32:X8} => new RSP=0x{ctx->Rsp:X}", 7);
             ctx->Rip += 7;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         if (op2 == 0x8B && op3 == 0x04)      // 48 8B 04 24  -> MOV RAX, [RSP]
@@ -894,7 +870,6 @@ public static unsafe class X64Emulator
                 ctx->Rax = value;
                 Log($"MOV RAX, [RSP] => RAX=0x{value:X}", 4);
                 ctx->Rip += 4;
-                LogRegisters(ctx, "[AFTER]");
                 return true;
             }
         }
@@ -924,7 +899,6 @@ public static unsafe class X64Emulator
                 *dst = *src;
                 Log($"MOV R{rm}, R{reg} => R{rm}=0x{*dst:X}", offs);
                 ctx->Rip += (ulong)offs;
-                LogRegisters(ctx, "[AFTER]");
                 return true;
             }
 
@@ -1020,7 +994,6 @@ public static unsafe class X64Emulator
             // Pretty log of addressing
             Log($"MOV [0x{memAddr:X}], R{reg} => [mem]=0x{*src:X}", offs);
             ctx->Rip += (ulong)offs;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
 
@@ -1119,7 +1092,6 @@ public static unsafe class X64Emulator
 
             Log($"MOV R{reg}, [0x{memAddr:X}] => R{reg}=0x{value:X}", offs);
             ctx->Rip += (ulong)offs;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         Log($"Unsupported REX-prefixed opcode 0x48 0x{op2:X2} 0x{op3:X2}", 3);
@@ -1139,7 +1111,6 @@ public static unsafe class X64Emulator
             ctx->Rsp -= 8;
             *(ulong*)ctx->Rsp = *regPtr;
             ctx->Rip += 2;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         // POP R8–R15 (41 58–5F)
@@ -1152,7 +1123,6 @@ public static unsafe class X64Emulator
             *regPtr = v;
             Log($"POP R{8 + reg}", 2);
             ctx->Rip += 2;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         Log($"Unsupported 41 0x{op2:X2}", 2);
@@ -1175,7 +1145,6 @@ public static unsafe class X64Emulator
             *dstRegPtr = *srcRegPtr;
             Log($"MOV R{rm}, R{reg} => R{rm}=0x{*dstRegPtr:X}", 2);
             ctx->Rip += 2;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         else if (mod == 0b01)
@@ -1188,7 +1157,6 @@ public static unsafe class X64Emulator
             *(ulong*)memAddr = value;
             Log($"MOV [R{rm}{disp8:+#;-#;0}], R{reg}  => 0x{memAddr:X}=0x{value:X}", 3);
             ctx->Rip += 3;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
         else if (mod == 0b10)
@@ -1207,7 +1175,6 @@ public static unsafe class X64Emulator
                 *(ulong*)memAddr = value;
                 Log($"MOV [SIB+disp32 0x{memAddr:X}], R{reg} => 0x{memAddr:X}=0x{value:X}", 7);
                 ctx->Rip += 7;
-                LogRegisters(ctx, "[AFTER]");
                 return true;
             }
             else
@@ -1220,7 +1187,6 @@ public static unsafe class X64Emulator
                 *(ulong*)memAddr = value;
                 Log($"MOV [R{rm}+0x{disp32:X}], R{reg} => 0x{memAddr:X}=0x{value:X}", 6);
                 ctx->Rip += 6;
-                LogRegisters(ctx, "[AFTER]");
                 return true;
             }
         }
@@ -1237,7 +1203,6 @@ public static unsafe class X64Emulator
             *(ulong*)memAddr = value;
             Log($"MOV [SIB 0x{memAddr:X}], R{reg} => 0x{memAddr:X}=0x{value:X}", 3);
             ctx->Rip += 3;
-            LogRegisters(ctx, "[AFTER]");
             return true;
         }
 
@@ -1310,7 +1275,6 @@ public static unsafe class X64Emulator
         *(uint*)memAddr = imm32;
         Log($"MOV dword ptr [0x{memAddr:X}], 0x{imm32:X8}", 3);
         ctx->Rip += (ulong)(offs);
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
     private static bool HandleCall(CONTEXT* ctx, byte* address, Action<string, int> Log)
@@ -1322,7 +1286,6 @@ public static unsafe class X64Emulator
         ctx->Rsp -= 8;
         *(ulong*)ctx->Rsp = returnAddress;
         ctx->Rip = newRip;
-        LogRegisters(ctx, "[AFTER]");
         return true;
     }
     // ...other opcode handlers can be extracted similarly...
