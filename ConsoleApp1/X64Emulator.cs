@@ -1,9 +1,56 @@
-﻿using System;
-using System.Linq;
-using System.Runtime.InteropServices;
-
-public static unsafe class InstructionEmulator
+﻿using System.Runtime.InteropServices;
+public static class X64Opcodes
 {
+    public const byte ADD_RM8_R8 = 0x00;
+    public const byte JBE_SHORT = 0x76;
+    public const byte NOP = 0x90;
+    public const byte LEAVE = 0xC9;
+    public const byte RET = 0xC3;
+    public const byte PUSH_RBP = 0x55;
+    public const byte MOV_RM8_IMM8 = 0xC6;
+    public const byte MOV_R64_RM64 = 0x8B;
+    public const byte ADD_R32_RM32 = 0x03;
+    public const byte FF_GROUP = 0xFF;
+    public const byte JB_SHORT = 0x72;
+    public const byte REX_PREFIX = 0x48;
+    public const byte REX_B_GROUP = 0x41;
+    public const byte MOV_RM32_IMM32 = 0xC7;
+    public const byte PUSH_RDI = 0x57;
+    public const byte PUSH_RSI = 0x56;
+    public const byte PUSH_RBX = 0x53;
+    public const byte MOV_RM64_R64 = 0x89;
+    public const byte JMP_SHORT = 0xEB;
+    public const byte POP_RBP = 0x5D;
+    public const byte JMP = 0xE9;
+    public const byte CALL = 0xE8;
+    public const byte TWO_BYTE = 0x0F;
+    public const byte CMP_AL_IMM8 = 0x3C;
+    public const byte JNE_SHORT = 0x75;
+    // ...add more as needed
+}
+public static unsafe class X64Emulator
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct EXCEPTION_POINTERS
+    {
+        public IntPtr ExceptionRecord;
+        public IntPtr ContextRecord;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct CONTEXT
+    {
+        public ulong P1Home, P2Home, P3Home, P4Home, P5Home, P6Home;
+        public uint ContextFlags;
+        public uint MxCsr;
+        public ushort SegCs, SegDs, SegEs, SegFs, SegGs, SegSs;
+        public uint EFlags;
+        public ulong Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
+        public ulong Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi;
+        public ulong R8, R9, R10, R11, R12, R13, R14, R15;
+        public ulong Rip;
+    }
+
     private static string FormatBytes(byte* address, int count)
     {
         var bytes = new byte[count];
@@ -16,7 +63,7 @@ public static unsafe class InstructionEmulator
         Console.WriteLine($"{prefix} RIP=0x{ctx->Rip:X} RSP=0x{ctx->Rsp:X} RAX=0x{ctx->Rax:X} RBX=0x{ctx->Rbx:X} RCX=0x{ctx->Rcx:X} RDX=0x{ctx->Rdx:X} RBP=0x{ctx->Rbp:X} RSI=0x{ctx->Rsi:X} RDI=0x{ctx->Rdi:X} R8=0x{ctx->R8:X} R9=0x{ctx->R9:X} R10=0x{ctx->R10:X} R11=0x{ctx->R11:X} R12=0x{ctx->R12:X} R13=0x{ctx->R13:X} R14=0x{ctx->R14:X} R15=0x{ctx->R15:X} EFlags=0x{ctx->EFlags:X}");
     }
 
-    private static bool EmulateX64Instruction(ref EXCEPTION_POINTERS exceptionInfo, byte* address)
+    public static bool Emulate(ref EXCEPTION_POINTERS exceptionInfo, byte* address)
     {
         var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
         LogRegisters(ctx, "[BEFORE]");
@@ -29,21 +76,9 @@ public static unsafe class InstructionEmulator
             Console.WriteLine($"[{bytes}] [0x{opcode:X2}] {info} | {regs}");
         }
 
-        //byte* ip = address;
-        //byte rex = 0;
-
-        //// skip all 0x40–0x4F prefixes
-        //while ((*ip & 0xF0) == 0x40)
-        //{
-        //    rex = *ip;
-        //    ip++;
-        //}
-
-        //address = ip;
-
         switch (opcode)
         {
-            case 0x00: // ADD r/m8, r8
+            case X64Opcodes.ADD_RM8_R8:
                 {
                     byte modrm = *(address + 1);
                     byte mod = (byte)((modrm >> 6) & 0x3);
@@ -130,7 +165,7 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            case 0x76: // JBE short rel8
+            case X64Opcodes.JBE_SHORT:
                 {
                     sbyte rel8 = *(sbyte*)(address + 1);
                     long disp = rel8; // sign-extended
@@ -146,12 +181,12 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            case 0x90:
+            case X64Opcodes.NOP:
                 Log("NOP", 1);
                 ctx->Rip += 1;
                 LogRegisters(ctx, "[AFTER]");
                 return true;
-            case 0xC9:
+            case X64Opcodes.LEAVE:
                 {
                     Log("LEAVE", 1);
                     ctx->Rsp = ctx->Rbp;
@@ -161,7 +196,7 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            case 0xC3:
+            case X64Opcodes.RET:
                 {
                     ulong ret = *(ulong*)ctx->Rsp;
                     Log($"RET to 0x{ret:X}", 1);
@@ -170,14 +205,14 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            case 0x55:
+            case X64Opcodes.PUSH_RBP:
                 Log("PUSH RBP", 1);
                 ctx->Rsp -= 8;
                 *(ulong*)ctx->Rsp = ctx->Rbp;
                 ctx->Rip += 1;
                 LogRegisters(ctx, "[AFTER]");
                 return true;
-            case 0xC6: // MOV r/m8, imm8
+            case X64Opcodes.MOV_RM8_IMM8:
                 {
                     byte modrm = *(address + 1);
                     byte mod = (byte)((modrm >> 6) & 0x3);
@@ -222,7 +257,7 @@ public static unsafe class InstructionEmulator
                         byte scale = (byte)((sib >> 6) & 0x3);
                         byte index = (byte)((sib >> 3) & 0x7);
                         byte baseReg = (byte)(sib & 0x7);
-                       
+
                         // Base
                         if (baseReg == 5 && mod == 0)
                         {
@@ -264,7 +299,7 @@ public static unsafe class InstructionEmulator
                         offs += 4;
                     }
 
-                    
+
 
                     // --- Immediate value ---
                     byte imm8 = *(address + offs++);
@@ -309,13 +344,12 @@ public static unsafe class InstructionEmulator
                     Log($"MOV byte ptr [0x{memAddr:X}], 0x{imm8:X2}", offs);
                     *(byte*)memAddr = imm8;
 
-                    
+
                     ctx->Rip += (ulong)offs;
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            //8B C1
-            case 0x8B: // MOV r64, r/m64
+            case X64Opcodes.MOV_R64_RM64:
                 {
                     byte modrm = *(address + 1);
                     byte mod = (byte)((modrm >> 6) & 0x3);
@@ -358,8 +392,7 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            //03 45
-            case 0x03: // ADD r32/64, r/m32/64  (REX.W => 64-bit)
+            case X64Opcodes.ADD_R32_RM32:
                 {
                     // --- Detect a single REX prefix immediately before opcode (simple but effective) ---
                     bool rexPresent = (address > (byte*)0) && (*(address - 1) >= 0x40 && *(address - 1) <= 0x4F);
@@ -505,8 +538,7 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            //0xFF
-            case 0xFF:
+            case X64Opcodes.FF_GROUP:
                 {
                     byte modrm = *(address + 1);
                     byte mod = (byte)((modrm >> 6) & 0x3);
@@ -528,7 +560,7 @@ public static unsafe class InstructionEmulator
                 }
 
             //0x72
-            case 0x72: // JB short rel8
+            case X64Opcodes.JB_SHORT:
                 {
                     sbyte rel8 = *(sbyte*)(address + 1);
                     long disp = rel8; // sign-extended
@@ -540,7 +572,7 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            case 0x48:
+            case X64Opcodes.REX_PREFIX:
                 {
                     byte op2 = *(address + 1);
                     byte op3 = *(address + 2);
@@ -958,7 +990,7 @@ public static unsafe class InstructionEmulator
                     return false;
                 }
             // PUSH R15
-            case 0x41:
+            case X64Opcodes.REX_B_GROUP:
                 {
                     byte op2 = *(address + 1);
 
@@ -993,7 +1025,7 @@ public static unsafe class InstructionEmulator
                     return false;
                 }
             // MOV DWORD PTR
-            case 0xC7:
+            case X64Opcodes.MOV_RM32_IMM32:
                 {
                     byte modrm = *(address + 1);
                     byte mod = (byte)((modrm >> 6) & 0x3);
@@ -1062,28 +1094,28 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            case 0x57: // push rdi
+            case X64Opcodes.PUSH_RDI:
                 Log("PUSH RDI", 1);
                 ctx->Rsp -= 8;
                 *(ulong*)ctx->Rsp = ctx->Rdi;
                 ctx->Rip += 1;
                 LogRegisters(ctx, "[AFTER]");
                 return true;
-            case 0x56: // push rsi
+            case X64Opcodes.PUSH_RSI:
                 Log("PUSH RSI", 1);
                 ctx->Rsp -= 8;
                 *(ulong*)ctx->Rsp = ctx->Rsi;
                 ctx->Rip += 1;
                 LogRegisters(ctx, "[AFTER]");
                 return true;
-            case 0x53: // push rbx
+            case X64Opcodes.PUSH_RBX:
                 Log("PUSH RBX", 1);
                 ctx->Rsp -= 8;
                 *(ulong*)ctx->Rsp = ctx->Rbx;
                 ctx->Rip += 1;
                 LogRegisters(ctx, "[AFTER]");
                 return true;
-            case 0x89:
+            case X64Opcodes.MOV_RM64_R64:
                 {
                     byte modrm = *(address + 1);
                     byte mod = (byte)((modrm >> 6) & 0x3);
@@ -1121,7 +1153,7 @@ public static unsafe class InstructionEmulator
                     Log($"Unsupported MOV with ModRM 0x{modrm:X2}", 3);
                     return false;
                 }
-            case 0xEB:
+            case X64Opcodes.JMP_SHORT:
                 {
                     sbyte rel8 = *(sbyte*)(address + 1);
                     ulong newRip = ctx->Rip + 2 + (ulong)rel8;
@@ -1131,7 +1163,7 @@ public static unsafe class InstructionEmulator
                     return true;
                 }
             //5D C3
-            case 0x5D:
+            case X64Opcodes.POP_RBP:
                 {
                     Log("POP RBP", 1);
                     ctx->Rbp = *(ulong*)ctx->Rsp;
@@ -1154,7 +1186,7 @@ public static unsafe class InstructionEmulator
                     }
                 }
             // jmp
-            case 0xE9:
+            case X64Opcodes.JMP:
                 {
                     int rel32 = *(int*)(address + 1);
                     ulong newRip = ctx->Rip + 5 + (ulong)rel32;
@@ -1164,7 +1196,7 @@ public static unsafe class InstructionEmulator
                     return true;
                 }
             // call
-            case 0xE8:
+            case X64Opcodes.CALL:
                 {
                     int rel32 = *(int*)(address + 1);
                     ulong returnAddress = ctx->Rip + 5;
@@ -1176,7 +1208,7 @@ public static unsafe class InstructionEmulator
                     LogRegisters(ctx, "[AFTER]");
                     return true;
                 }
-            case 0x0F:
+            case X64Opcodes.TWO_BYTE:
                 {
                     byte op2 = *(address + 1);
 
@@ -1250,7 +1282,7 @@ public static unsafe class InstructionEmulator
                     Log($"Unsupported opcode sequence 0x0F 0x{op2:X2}", 3);
                     return false;
                 }
-            case 0x3C: // CMP AL, imm8
+            case X64Opcodes.CMP_AL_IMM8:
                 {
                     byte imm8 = *(address + 1);
                     byte al = (byte)(ctx->Rax & 0xFF);
@@ -1299,7 +1331,7 @@ public static unsafe class InstructionEmulator
                     ctx->Rip += 2;
                     return true;
                 }
-            case 0x75:
+            case X64Opcodes.JNE_SHORT:
                 {
                     sbyte rel8 = *(sbyte*)(address + 1);
                     bool zeroFlag = (ctx->EFlags & 0x40) != 0;
@@ -1320,129 +1352,6 @@ public static unsafe class InstructionEmulator
             default:
                 Log($"Unsupported opcode 0x{opcode:X2}", 2);
                 return false;
-        }
-    }
-    // ------------------------------------------------------------------------
-    // Global State
-    // ------------------------------------------------------------------------
-    private static IntPtr g_codeAddress = IntPtr.Zero;
-    private static UIntPtr g_codeSize = UIntPtr.Zero;
-    private static int g_instructionCount = 0;
-
-    // ------------------------------------------------------------------------
-    // Win32 Interop
-    // ------------------------------------------------------------------------
-    private const uint EXCEPTION_SINGLE_STEP = 0x80000004;
-    private const uint EXCEPTION_CONTINUE_EXECUTION = 0xFFFFFFFF;
-    private const uint EXCEPTION_CONTINUE_SEARCH = 0x0;
-
-    private const int CONTEXT_FULL = 0x10007;
-    public const int CONTEXT_DEBUG_REGISTERS = 0x00100010;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct EXCEPTION_POINTERS
-    {
-        public IntPtr ExceptionRecord;
-        public IntPtr ContextRecord;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct CONTEXT
-    {
-        public ulong P1Home, P2Home, P3Home, P4Home, P5Home, P6Home;
-        public uint ContextFlags;
-        public uint MxCsr;
-        public ushort SegCs, SegDs, SegEs, SegFs, SegGs, SegSs;
-        public uint EFlags;
-        public ulong Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
-        public ulong Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi;
-        public ulong R8, R9, R10, R11, R12, R13, R14, R15;
-        public ulong Rip;
-    }
-   
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr AddVectoredExceptionHandler(uint First, IntPtr Handler);
-
-    [DllImport("kernel32.dll")]
-    private static extern uint RemoveVectoredExceptionHandler(IntPtr handle);
-
-    private static void SetHWBP(ref EXCEPTION_POINTERS exceptionInfo, void* address)
-    {
-        var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
-        var context = *ctx;
-        ctx->Dr0 = (ulong)address;
-        ctx->Dr7 = 0x1ul; // Enable DR0 as execute breakpoint
-    }
-
-    private static void ClearHWBP(ref EXCEPTION_POINTERS exceptionInfo)
-    {
-        var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
-        ctx->Dr0 = 0;
-        ctx->Dr7 = 0;
-    }
-   
-    private static uint ExceptionHandler(ref EXCEPTION_POINTERS exceptionInfo)
-    {
-        // Access ExceptionRecord->ExceptionCode
-        uint code = *((uint*)exceptionInfo.ExceptionRecord);
-
-        if (code == EXCEPTION_SINGLE_STEP)
-        {
-            var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
-            ulong rip = ctx->Rip;
-            if (rip >= (ulong)g_codeAddress && rip < (ulong)g_codeAddress + (ulong)g_codeSize)
-            {
-                g_instructionCount++;
-
-                if (!EmulateX64Instruction(ref exceptionInfo, (byte*)rip))
-                {
-                    ClearHWBP(ref exceptionInfo);
-                    return EXCEPTION_CONTINUE_SEARCH;
-                }
-
-                if (ctx->Rip >= (ulong)g_codeAddress && ctx->Rip < (ulong)g_codeAddress + (ulong)g_codeSize)
-                {
-                    SetHWBP(ref exceptionInfo, (void*)ctx->Rip);
-
-                }
-                else
-                {
-                    ClearHWBP(ref exceptionInfo);
-                }
-
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-            else
-            {
-                Console.WriteLine($"[VEH] RIP 0x{rip:X} outside target code range, continuing search.");
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-        }
-
-        Console.WriteLine($"[VEH] Exception code 0x{code:X} not handled, continuing search.");
-
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    private static IntPtr _vehHandle;
-    public static void Initialize(IntPtr codeAddr, UIntPtr codeSize)
-    {
-        g_codeAddress = codeAddr;
-        g_codeSize = codeSize;
-        var method = typeof(InstructionEmulator).GetMethod(nameof(ExceptionHandler), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
-            .MethodHandle
-            .GetFunctionPointer();
-
-        _vehHandle = AddVectoredExceptionHandler(1, method);
-    }
-
-    public static void Uninitialize()
-    {
-        if (_vehHandle != IntPtr.Zero)
-        {
-            RemoveVectoredExceptionHandler(_vehHandle);
-            _vehHandle = IntPtr.Zero;
         }
     }
 }

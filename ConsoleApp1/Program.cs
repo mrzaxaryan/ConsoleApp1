@@ -2,9 +2,47 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using static InstructionEmulator;
+using static VectoredExceptionHandler;
+using static X64Emulator;
 unsafe class Program
 {
+    static byte[] Build(int stackSize)
+    {
+        var b = new List<byte>(64);
+
+        // prologue
+        b.AddRange(new byte[] { 0x55, 0x48, 0x89, 0xE5 });
+
+        // sub rsp, imm32
+        b.AddRange(new byte[] { 0x48, 0x81, 0xEC });
+        b.AddRange(BitConverter.GetBytes(stackSize)); // 00 80 00 00 for 0x8000
+
+        // mov dword ptr [rbp-4], 5
+        b.AddRange(new byte[] { 0xC7, 0x45, 0xFC, 0x05, 0x00, 0x00, 0x00 });
+
+        // xor rcx, rcx
+        b.AddRange(new byte[] { 0x48, 0x31, 0xC9 });
+
+        // mov byte ptr [rbp+rcx+disp32], 0   (disp32 = -stackSize)
+        b.AddRange(new byte[] { 0xC6, 0x84, 0x0D });
+        b.AddRange(BitConverter.GetBytes(unchecked((int)-stackSize))); // 00 80 FF FF for 0x8000
+        b.Add(0x00); // imm8
+
+        // inc rcx
+        b.AddRange(new byte[] { 0x48, 0xFF, 0xC1 });
+
+        // cmp rcx, imm32
+        b.AddRange(new byte[] { 0x48, 0x81, 0xF9 });
+        b.AddRange(BitConverter.GetBytes(stackSize));
+
+        // jb short -0x14
+        b.AddRange(new byte[] { 0x72, 0xEC });
+
+        // mov eax, ecx ; add eax, [rbp-4] ; epilogue
+        b.AddRange(new byte[] { 0x8B, 0xC1, 0x03, 0x45, 0xFC, 0x48, 0x89, 0xEC, 0x5D, 0xC3 });
+
+        return b.ToArray();
+    }
     [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
     static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
 
@@ -23,24 +61,10 @@ unsafe class Program
     static void Main()
     {
         int[] a = new int[1024 * 64]; 
-        byte[] code1 = File.ReadAllBytes("64.bin");
-        byte[] code = new byte[]
-        {
-    0x55,                               // push rbp
-    0x48, 0x89, 0xE5,                   // mov rbp, rsp
-    0x48, 0x81, 0xEC, 0x00, 0x80, 0x00, 0x00, // sub rsp, 0x8000 (32 KB)
-    0xC7, 0x45, 0xFC, 0x05, 0x00, 0x00, 0x00, // mov dword ptr [rbp-4], 5
-    0x48, 0x31, 0xC9,                   // xor rcx, rcx
-    0xC6, 0x84, 0x0D, 0x00, 0x80, 0xFF, 0xFF, 0x00, // mov byte ptr [rbp+rcx-0x8000], 0
-    0x48, 0xFF, 0xC1,                   // inc rcx
-    0x48, 0x81, 0xF9, 0x00, 0x80, 0x00, 0x00, // cmp rcx, 0x8000
-    0x72, 0xEC,                         // jb short back to MOV (-0x14)
-    0x8B, 0xC1,                         // mov eax, ecx
-    0x03, 0x45, 0xFC,                   // add eax, dword ptr [rbp-4]
-    0x48, 0x89, 0xEC,                   // mov rsp, rbp
-    0x5D,                               // pop rbp
-    0xC3                                // ret
-        };
+        byte[] code = File.ReadAllBytes("64.bin");
+        int stackSize = 1024 * 40; // you can change this dynamically
+
+        byte[] code1 = Build(stackSize);
 
         //IntPtr buffer = VirtualAlloc(IntPtr.Zero, (uint)code.Length, 0x1000 | 0x2000, 0x40); // MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
         //Marshal.Copy(code, 0, buffer, code.Length);
@@ -56,7 +80,7 @@ unsafe class Program
             UIntPtr g_codeSize = (UIntPtr)code.Length;
 
             // Initialize emulator (sets up VEH)
-            InstructionEmulator.Initialize(g_codeAddress, g_codeSize);
+            VectoredExceptionHandler.Initialize(g_codeAddress, g_codeSize);
 
             int size = Marshal.SizeOf<CONTEXT>();
             CONTEXT* pCtx = (CONTEXT*)Marshal.AllocHGlobal(size);
