@@ -3,6 +3,83 @@ using System.Text;
 using System.Runtime.InteropServices;
 public static unsafe class X64Emulator
 {
+    public static bool Emulate(ref EXCEPTION_POINTERS exceptionInfo, byte* address)
+    {
+        var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
+        var before = RegSnapshot.FromContext(ctx);
+        void Log(string mnemonic, int instrLen)
+        {
+            string bytes = FormatBytes(address, instrLen);
+            string instrAddr = $"0x{before.Rip:X}";
+            //string regs = $"RIP=0x{before.Rip:X} RSP=0x{before.Rsp:X} RAX=0x{before.Rax:X} RCX=0x{before.Rcx:X} RDX=0x{before.Rdx:X} RBP=0x{before.Rbp:X} EFlags=0x{before.EFlags:X}";
+            var afterSnap = RegSnapshot.FromContext(ctx);
+            string diff = FormatRegisterDiff(before, afterSnap);
+            string currentLog = $"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " =>" + diff : "")}";
+            Console.WriteLine(currentLog);
+        }
+
+        bool result;
+        if (*address == 0x0F && *(address + 1) == 0xB6)
+        {
+            result = HandleMovzxR32Rm8(ctx, address, Log);
+        }
+        else if (*address == 0x48 && *(address + 1) == 0x83 && *(address + 2) == 0xAC && *(address + 3) == 0x24)
+        {
+            result = HandleSubRm64Imm8(ctx, address, Log);
+        }
+        else if (*address == 0x48 && *(address + 1) == 0x83 && (*(address + 2) & 0x38) == 0x00)
+        {
+            result = HandleAddRm64Imm8(ctx, address, Log);
+        }
+        else if (*address == 0x65)
+        {
+            result = HandleSegmentPrefix(ctx, address, Log);
+        }
+        else
+        {
+            switch (*address)
+            {
+                case X64Opcodes.ADD_RM8_R8:
+                    result = HandleAddRm8R8(ctx, address, Log); break;
+                case X64Opcodes.JBE_SHORT:
+                    result = HandleJbeShort(ctx, address, Log); break;
+                case X64Opcodes.JNE_SHORT:
+                    result = HandleJneShort(ctx, address, Log); break;
+                case X64Opcodes.NOP:
+                    result = HandleNop(ctx, Log); break;
+                case X64Opcodes.PUSH_RBP:
+                    result = HandlePushRbp(ctx, Log); break;
+                case X64Opcodes.REX_PREFIX:
+                    result = HandleRexPrefix(ctx, address, Log); break;
+                case X64Opcodes.REX_B_GROUP:
+                    result = HandleRexBGroup(ctx, address, Log); break;
+                case X64Opcodes.PUSH_RDI:
+                    result = HandlePushRdi(ctx, Log); break;
+                case X64Opcodes.PUSH_RSI:
+                    result = HandlePushRsi(ctx, Log); break;
+                case X64Opcodes.PUSH_RBX:
+                    result = HandlePushRbx(ctx, Log); break;
+                case X64Opcodes.MOV_RM64_R64:
+                    result = HandleMovRm64R64(ctx, address, Log); break;
+                case X64Opcodes.MOV_RM32_IMM32:
+                    result = HandleMovRm32Imm32(ctx, address, Log); break;
+                case X64Opcodes.CALL:
+                    result = HandleCall(ctx, address, Log); break;
+                case X64Opcodes.RET:
+                    result = HandleRet(ctx, Log); break;
+                case X64Opcodes.JMP_SHORT:
+                    result = HandleJmpShort(ctx, address, Log); break;
+                case X64Opcodes.CMP_AL_IMM8:
+                    result = HandleCmpAlImm8(ctx, address, Log); break;
+                // ... keep other cases as-is for now ...
+                default:
+                    Log($"Unsupported opcode 0x{*address:X2}", 2);
+                    result = false;
+                    break;
+            }
+        }
+        return result;
+    }
     [StructLayout(LayoutKind.Sequential)]
     public struct EXCEPTION_POINTERS
     {
@@ -223,81 +300,7 @@ public static unsafe class X64Emulator
         ctx->Rip += (ulong)offs;
         return true;
     }
-
-
-    public static bool Emulate(ref EXCEPTION_POINTERS exceptionInfo, byte* address)
-    {
-        var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
-        var before = RegSnapshot.FromContext(ctx);
-        void Log(string mnemonic, int instrLen)
-        {
-            string bytes = FormatBytes(address, instrLen);
-            string instrAddr = $"0x{before.Rip:X}";
-            //string regs = $"RIP=0x{before.Rip:X} RSP=0x{before.Rsp:X} RAX=0x{before.Rax:X} RCX=0x{before.Rcx:X} RDX=0x{before.Rdx:X} RBP=0x{before.Rbp:X} EFlags=0x{before.EFlags:X}";
-            var afterSnap = RegSnapshot.FromContext(ctx);
-            string diff = FormatRegisterDiff(before, afterSnap);
-            string currentLog = $"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " =>" + diff : "")}";
-            Console.WriteLine(currentLog);
-        }
-
-        bool result;
-        if (*address == 0x0F && *(address + 1) == 0xB6)
-        {
-            result = HandleMovzxR32Rm8(ctx, address, Log);
-        }
-        else if (*address == 0x48 && *(address + 1) == 0x83 && *(address + 2) == 0xAC && *(address + 3) == 0x24)
-        {
-            result = HandleSubRm64Imm8(ctx, address, Log);
-        }
-        else if (*address == 0x48 && *(address + 1) == 0x83 && (*(address + 2) & 0x38) == 0x00)
-        {
-            result = HandleAddRm64Imm8(ctx, address, Log);
-        }
-        else
-        {
-            switch (*address)
-            {
-                case X64Opcodes.ADD_RM8_R8:
-                    result = HandleAddRm8R8(ctx, address, Log); break;
-                case X64Opcodes.JBE_SHORT:
-                    result = HandleJbeShort(ctx, address, Log); break;
-                case X64Opcodes.JNE_SHORT:
-                    result = HandleJneShort(ctx, address, Log); break;
-                case X64Opcodes.NOP:
-                    result = HandleNop(ctx, Log); break;
-                case X64Opcodes.PUSH_RBP:
-                    result = HandlePushRbp(ctx, Log); break;
-                case X64Opcodes.REX_PREFIX:
-                    result = HandleRexPrefix(ctx, address, Log); break;
-                case X64Opcodes.REX_B_GROUP:
-                    result = HandleRexBGroup(ctx, address, Log); break;
-                case X64Opcodes.PUSH_RDI:
-                    result = HandlePushRdi(ctx, Log); break;
-                case X64Opcodes.PUSH_RSI:
-                    result = HandlePushRsi(ctx, Log); break;
-                case X64Opcodes.PUSH_RBX:
-                    result = HandlePushRbx(ctx, Log); break;
-                case X64Opcodes.MOV_RM64_R64:
-                    result = HandleMovRm64R64(ctx, address, Log); break;
-                case X64Opcodes.MOV_RM32_IMM32:
-                    result = HandleMovRm32Imm32(ctx, address, Log); break;
-                case X64Opcodes.CALL:
-                    result = HandleCall(ctx, address, Log); break;
-                case X64Opcodes.RET:
-                    result = HandleRet(ctx, Log); break;
-                case X64Opcodes.JMP_SHORT:
-                    result = HandleJmpShort(ctx, address, Log); break;
-                case X64Opcodes.CMP_AL_IMM8:
-                    result = HandleCmpAlImm8(ctx, address, Log); break;
-                // ... keep other cases as-is for now ...
-                default:
-                    Log($"Unsupported opcode 0x{*address:X2}", 2);
-                    result = false;
-                    break;
-            }
-        }
-        return result;
-    }
+   
 
     // --- Opcode Handlers ---
     private static bool HandleAddRm64Imm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
@@ -1288,6 +1291,29 @@ public static unsafe class X64Emulator
         ctx->Rip = newRip;
         return true;
     }
+    private static bool HandleSegmentPrefix(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        if (*address != 0x65) return false; // only GS prefix
+
+        byte* next = address + 1;
+
+        // Example: 65 48 8B 04 25 XX XX XX XX  => MOV RAX, [GS:disp32]
+        if (*next == 0x48 && *(next + 1) == 0x8B && *(next + 2) == 0x04 && *(next + 3) == 0x25)
+        {
+            uint disp32 = *(uint*)(next + 4);
+            ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
+            ulong addr = tebBase + disp32;
+            ulong value = *(ulong*)addr;
+            ctx->Rax = value;
+            Log($"MOV RAX, [GS:0x{disp32:X}] => RAX=0x{value:X} (TEB base=0x{tebBase:X})", 9);
+            ctx->Rip += 9;
+            return true;
+        }
+
+        Log("Unhandled GS-prefixed opcode", 2);
+        return false;
+    }
+
     // ...other opcode handlers can be extracted similarly...
 }
 
