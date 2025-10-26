@@ -39,6 +39,29 @@ public static unsafe class X64Emulator
         {
             switch (*address)
             {
+                case 0x58: // POP RAX
+                case 0x59: // POP RCX
+                case 0x5A: // POP RDX
+                case 0x5B: // POP RBX
+                case 0x5C: // POP RSP
+                case 0x5D: // POP RBP
+                case 0x5E: // POP RSI
+                case 0x5F: // POP RDI
+                    result = HandlePopReg(ctx, *address, Log);
+                    break;
+                case 0x84:
+                    result = HandleTestRm8R8(ctx, address, Log);
+                    break;
+                case 0xB8:
+                case 0xB9:
+                case 0xBA:
+                case 0xBB:
+                case 0xBC:
+                case 0xBD:
+                case 0xBE:
+                case 0xBF:
+                    result = HandleMovImmToReg_NoRex(ctx, address, Log);
+                    break;
                 case X64Opcodes.ADD_RM8_R8:
                     result = HandleAddRm8R8(ctx, address, Log); break;
                 case X64Opcodes.JBE_SHORT:
@@ -72,10 +95,16 @@ public static unsafe class X64Emulator
                 case 0x8B:
                     result = HandleMovR32Rm32(ctx, address, Log);
                     break;
+                // In the Emulate method's switch statement, add this case:
+                case 0x74: // JE rel8
+                    result = HandleJeShort(ctx, address, Log); break;
                 case X64Opcodes.JMP_SHORT:
                     result = HandleJmpShort(ctx, address, Log); break;
                 case X64Opcodes.CMP_AL_IMM8:
                     result = HandleCmpAlImm8(ctx, address, Log); break;
+                case 0xC6:
+                    result = HandleMovRm8Imm8(ctx, address, Log);
+                    break;
                 // ... keep other cases as-is for now ...
                 default:
                     Log($"Unsupported opcode 0x{*address:X2}", 32);
@@ -85,6 +114,100 @@ public static unsafe class X64Emulator
         }
         return result;
     }
+    private static bool HandleMovRm8Imm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        byte modrm = *(address + 1);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        byte reg = (byte)((modrm >> 3) & 0x7);   // must be 0 for MOV
+        byte rm = (byte)(modrm & 0x7);
+        int offs = 2;
+
+        if (reg != 0)
+        {
+            Log($"Unsupported C6 /{reg} variant", offs);
+            return false;
+        }
+
+        byte imm8 = *(address + offs);
+        offs++;
+
+        if (mod == 0b11)
+        {
+            // register direct
+            byte* dst = (byte*)((&ctx->Rax) + rm);
+            *dst = imm8;
+            Log($"MOV R{rm}b, 0x{imm8:X2}", offs);
+        }
+        else
+        {
+            // memory
+            ulong addr = *((&ctx->Rax) + rm);
+            if (mod == 0b01)
+            {
+                long disp8 = *(sbyte*)(address + offs);
+                offs++;
+                addr += (ulong)disp8;
+            }
+            else if (mod == 0b10)
+            {
+                int disp32 = *(int*)(address + offs);
+                offs += 4;
+                addr += (ulong)(long)disp32;
+            }
+            *(byte*)addr = imm8;
+            Log($"MOV BYTE PTR [0x{addr:X}], 0x{imm8:X2}", offs);
+        }
+
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+    private static bool HandlePopReg(CONTEXT* ctx, byte opcode, Action<string, int> Log)
+    {
+        int reg = opcode - 0x58;            // 0..7 => RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI
+        ulong val = *(ulong*)ctx->Rsp;      // read from stack
+        ctx->Rsp += 8;                      // pop
+        *((&ctx->Rax) + reg) = val;         // write destination
+
+        Log($"POP R{reg}", 1);
+        ctx->Rip += 1;
+        return true;
+    }
+    private static bool HandleTestRm8R8(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // TEST r/m8, r8  => bitwise AND but no result stored
+        byte modrm = *(address + 1);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        byte reg = (byte)((modrm >> 3) & 0x7);
+        byte rm = (byte)(modrm & 0x7);
+        int offs = 2;
+
+        byte src, dst;
+
+        if (mod == 0b11)
+        {
+            src = (byte)(((&ctx->Rax)[reg]) & 0xFF);
+            dst = (byte)(((&ctx->Rax)[rm]) & 0xFF);
+        }
+        else
+        {
+            ulong memAddr = *((&ctx->Rax) + rm);
+            dst = *(byte*)memAddr;
+            src = (byte)(((&ctx->Rax)[reg]) & 0xFF);
+        }
+
+        byte res = (byte)(src & dst);
+        bool zf = (res == 0);
+        bool sf = (res & 0x80) != 0;
+
+        ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) |
+                             (zf ? 0x40u : 0u) |
+                             (sf ? 0x80u : 0u));
+
+        Log($"TEST r/m8, r8 => (0x{dst:X2} & 0x{src:X2}) => ZF={(zf ? 1 : 0)} SF={(sf ? 1 : 0)}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct EXCEPTION_POINTERS
     {
@@ -128,6 +251,20 @@ public static unsafe class X64Emulator
             };
         }
     }
+    private static bool HandleMovImmToReg_NoRex(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        byte opcode = *address;                 // B8..BF
+        int reg = opcode - 0xB8;                // 0..7 => RAX..RDI
+        uint imm32 = *(uint*)(address + 1);
+
+        // Write 64-bit with zero-extend semantics (writing r32 clears upper 32)
+        ulong* dst = (&ctx->Rax) + reg;
+        *dst = (ulong)imm32;
+
+        Log($"MOV R{reg}, 0x{imm32:X8}", 5);
+        ctx->Rip += 5;
+        return true;
+    }
     private static string FormatRegisterDiff(RegSnapshot before, RegSnapshot after)
     {
         var sb = new StringBuilder();
@@ -140,6 +277,16 @@ public static unsafe class X64Emulator
         diff("R15", before.R15, after.R15);
         if (before.EFlags != after.EFlags) sb.Append($" EFlags:0x{before.EFlags:X}->0x{after.EFlags:X}");
         return sb.ToString();
+    }
+    // Add this handler method anywhere in the X64Emulator class (e.g., near other branch handlers)
+    private static bool HandleJeShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        sbyte rel8 = *(sbyte*)(address + 1);
+        bool zf = (ctx->EFlags & 0x40) != 0;
+        ulong target = (ulong)((long)ctx->Rip + 2 + rel8);
+        Log($"JE short 0x{target:X} {(zf ? "TAKEN" : "NOT taken")}", 2);
+        ctx->Rip = zf ? target : ctx->Rip + 2;
+        return true;
     }
     private static bool HandleMovR32Rm32(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
@@ -639,6 +786,7 @@ public static unsafe class X64Emulator
             ctx->Rip += 4;
             return true;
         }
+
         // --- generic: REX.W + 81 /r  => Group1 (imm32 sign-extended) on r/m64 ---
         if (op2 == 0x81)
         {
@@ -1073,6 +1221,149 @@ public static unsafe class X64Emulator
             ctx->Rip += (ulong)offs;
             return true;
         }
+        // --- generic: REX.W + 83 /r  => Group1 with imm8 (sign-extended) on r/m64 ---
+        if (op2 == 0x83)
+        {
+            if ((rex & 0x08) == 0)  // must be W=1 for 64-bit
+            {
+                Log($"Unsupported REX(non-W) 0x48 0x83 (only W=1 supported)", 2);
+                return false;
+            }
+
+            int offs = 2; // at ModRM
+            byte modrm = *(address + offs++);
+            byte mod = (byte)((modrm >> 6) & 0x3);
+            int grp = (modrm >> 3) & 0x7;            // /0..7
+            int rm = (modrm & 0x7) | (B ? 8 : 0);
+
+            // Helper: SIB / RIP-rel address computation
+            ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
+            {
+                byte scaleBits = (byte)((sib >> 6) & 0x3);
+                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte baseBits = (byte)(sib & 0x7);
+
+                int indexReg = idxBits;
+                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                int baseReg = baseBits | (B ? 8 : 0);
+
+                ulong baseVal;
+                if (modLocal == 0b00 && baseBits == 0b101)
+                {
+                    int disp32sib = *(int*)(address + offsLocal); offsLocal += 4;
+                    baseVal = (ulong)(long)disp32sib;
+                }
+                else
+                {
+                    baseVal = *((&ctx->Rax) + baseReg);
+                }
+
+                ulong indexVal = 0;
+                if (idxBits != 0b100) // 0b100 => no index
+                {
+                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal <<= scaleBits; // scale = 1<<scaleBits
+                }
+                return baseVal + indexVal;
+            }
+
+            bool isReg = (mod == 0b11);
+            ulong memAddr = 0;
+            ulong* dstReg = null;
+
+            if (isReg)
+            {
+                dstReg = (&ctx->Rax) + rm;
+            }
+            else
+            {
+                if (mod == 0b00 && (modrm & 0x7) == 0b101)
+                {
+                    // RIP-relative disp32
+                    int disp32r = *(int*)(address + offs); offs += 4;
+                    ulong nextRip = ctx->Rip + (ulong)offs;
+                    memAddr = nextRip + (ulong)(long)disp32r;
+                }
+                else if ((modrm & 0x7) == 0b100)
+                {
+                    // SIB
+                    byte sib = *(address + offs++);
+                    memAddr = computeSibAddr(sib, mod, ref offs);
+                    if (mod == 0b01)
+                    {
+                        long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8;
+                    }
+                    else if (mod == 0b10)
+                    {
+                        int disp32 = *(int*)(address + offs); offs += 4;
+                        memAddr += (ulong)(long)disp32;
+                    }
+                }
+                else
+                {
+                    // [base] [+disp8/disp32]
+                    memAddr = *((&ctx->Rax) + rm);
+                    if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8; }
+                    else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)disp32; }
+                }
+            }
+
+            // imm8 sign-extended to 64
+            long simm8 = *(sbyte*)(address + offs); offs += 1;
+            ulong uimm = (ulong)simm8;
+
+            switch (grp)
+            {
+                case 0: // ADD
+                    if (isReg)
+                    {
+                        ulong old = *dstReg; *dstReg = old + uimm;
+                        Log($"ADD R{rm}, 0x{(byte)simm8:X2} => 0x{old:X}+0x{uimm:X}=0x{*dstReg:X}", offs);
+                    }
+                    else
+                    {
+                        ulong old = *(ulong*)memAddr; ulong nw = old + uimm; *(ulong*)memAddr = nw;
+                        Log($"ADD QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => 0x{old:X}+0x{uimm:X}=0x{nw:X}", offs);
+                    }
+                    ctx->Rip += (ulong)offs;
+                    return true;
+
+                case 5: // SUB
+                    if (isReg)
+                    {
+                        ulong old = *dstReg; *dstReg = old - uimm;
+                        Log($"SUB R{rm}, 0x{(byte)simm8:X2} => 0x{old:X}-0x{uimm:X}=0x{*dstReg:X}", offs);
+                    }
+                    else
+                    {
+                        ulong old = *(ulong*)memAddr; ulong nw = old - uimm; *(ulong*)memAddr = nw;
+                        Log($"SUB QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => 0x{old:X}-0x{uimm:X}=0x{nw:X}", offs);
+                    }
+                    ctx->Rip += (ulong)offs;
+                    return true;
+
+                case 7: // CMP
+                    {
+                        ulong lhs = isReg ? *dstReg : *(ulong*)memAddr;
+                        ulong res = lhs - uimm;
+                        bool zf = (res == 0);
+                        bool sf = (res & (1UL << 63)) != 0;
+                        ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+
+                        if (isReg)
+                            Log($"CMP R{rm}, 0x{(byte)simm8:X2} => (R{rm}=0x{lhs:X})", offs);
+                        else
+                            Log($"CMP QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => (mem=0x{lhs:X})", offs);
+
+                        ctx->Rip += (ulong)offs;
+                        return true;
+                    }
+
+                default:
+                    Log($"Unsupported 48 83 /{grp} form", offs);
+                    return false;
+            }
+        }
 
         if (op2 == 0x8B)
         {
@@ -1169,6 +1460,343 @@ public static unsafe class X64Emulator
 
             Log($"MOV R{reg}, [0x{memAddr:X}] => R{reg}=0x{value:X}", offs);
             ctx->Rip += (ulong)offs;
+            return true;
+        }
+
+        // Add inside HandleRexPrefix, after other special-cases:
+        if (op2 == 0x8D && op3 == 0x15) // 48 8D 15 xx xx xx xx => LEA RDX, [RIP+imm32]
+        {
+            int imm32 = *(int*)(address + 3);
+            ulong target = ctx->Rip + 7 + (ulong)(long)imm32; // 7 = length of instruction
+            ctx->Rdx = target;
+            Log($"LEA RDX, [RIP+0x{imm32:X}] => RDX=0x{target:X}", 7);
+            ctx->Rip += 7;
+            return true;
+        }
+        // --- generic: REX.W + 29 /r  => SUB r/m64, r64 ---
+        if (op2 == 0x29)
+        {
+            if ((rex & 0x08) == 0) // must be W=1
+            {
+                Log($"Unsupported REX(non-W) 0x48 0x29 (only W=1 supported)", 2);
+                return false;
+            }
+
+            int offs = 2; // start at ModRM
+            byte modrm = *(address + offs++);
+            byte mod = (byte)((modrm >> 6) & 0x3);
+            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // source r64 (REX.R)
+            int rm = (modrm & 0x7) | (B ? 8 : 0);         // dest   r/m64 (REX.B)
+
+            // Helper for SIB / RIP-relative
+            ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
+            {
+                byte scaleBits = (byte)((sib >> 6) & 0x3);
+                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte baseBits = (byte)(sib & 0x7);
+
+                int indexReg = idxBits;
+                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                int baseReg = baseBits | (B ? 8 : 0);
+
+                ulong baseVal;
+                if (modLocal == 0b00 && baseBits == 0b101)
+                {
+                    int disp32sib = *(int*)(address + offsLocal); offsLocal += 4;
+                    baseVal = (ulong)(long)disp32sib;
+                }
+                else
+                {
+                    baseVal = *((&ctx->Rax) + baseReg);
+                }
+
+                ulong indexVal = 0;
+                if (idxBits != 0b100)
+                {
+                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal <<= scaleBits; // 1<<scaleBits
+                }
+                return baseVal + indexVal;
+            }
+
+            ulong* src = (&ctx->Rax) + reg;
+
+            if (mod == 0b11)
+            {
+                // register form: SUB r64, r64
+                ulong* dst = (&ctx->Rax) + rm;
+                ulong old = *dst;
+                ulong nw = old - *src;
+                *dst = nw;
+
+                // Minimal flags used by your branches (ZF/SF)
+                bool zf = (nw == 0);
+                bool sf = (nw & (1UL << 63)) != 0;
+                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+
+                Log($"SUB R{rm}, R{reg} => 0x{old:X}-0x{*src:X}=0x{nw:X}", offs);
+                ctx->Rip += (ulong)offs;
+                return true;
+            }
+            else
+            {
+                // memory form: SUB [mem64], r64
+                ulong memAddr = 0;
+
+                if (mod == 0b00 && (modrm & 0x7) == 0b101)
+                {
+                    // RIP-relative disp32
+                    int disp32 = *(int*)(address + offs); offs += 4;
+                    ulong nextRip = ctx->Rip + (ulong)offs;
+                    memAddr = nextRip + (ulong)(long)disp32;
+                }
+                else if ((modrm & 0x7) == 0b100)
+                {
+                    // SIB (+ optional disp)
+                    byte sib = *(address + offs++);
+                    memAddr = computeSibAddr(sib, mod, ref offs);
+                    if (mod == 0b01)
+                    {
+                        long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8;
+                    }
+                    else if (mod == 0b10)
+                    {
+                        int disp32 = *(int*)(address + offs); offs += 4;
+                        memAddr += (ulong)(long)disp32;
+                    }
+                }
+                else
+                {
+                    memAddr = *((&ctx->Rax) + rm);
+                    if (mod == 0b01)
+                    {
+                        long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8;
+                    }
+                    else if (mod == 0b10)
+                    {
+                        int disp32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)disp32;
+                    }
+                }
+
+                ulong old = *(ulong*)memAddr;
+                ulong nw = old - *src;
+                *(ulong*)memAddr = nw;
+
+                bool zf = (nw == 0);
+                bool sf = (nw & (1UL << 63)) != 0;
+                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+
+                Log($"SUB QWORD PTR [0x{memAddr:X}], R{reg} => 0x{old:X}-0x{*src:X}=0x{nw:X}", offs);
+                ctx->Rip += (ulong)offs;
+                return true;
+            }
+        }
+
+        // --- generic: REX.W + 8D /r  => LEA r64, m ---
+        if (op2 == 0x8D)
+        {
+            if ((rex & 0x08) == 0) // must be W=1 for 64-bit result
+            {
+                Log($"Unsupported REX(non-W) 0x48 0x8D (only W=1 supported)", 2);
+                return false;
+            }
+
+            int offs = 2; // at ModRM
+            byte modrm = *(address + offs++);
+            byte mod = (byte)((modrm >> 6) & 0x3);
+            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // destination r64 (REX.R)
+            int rm = (modrm & 0x7) | (B ? 8 : 0);         // base (REX.B)
+
+            // SIB/RIP-rel helper
+            ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
+            {
+                byte scaleBits = (byte)((sib >> 6) & 0x3);
+                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte baseBits = (byte)(sib & 0x7);
+
+                int indexReg = idxBits;
+                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);      // REX.X extends index when present
+                int baseReg = baseBits | (B ? 8 : 0);              // REX.B extends base
+
+                ulong baseVal;
+                if (modLocal == 0b00 && baseBits == 0b101)
+                {
+                    int disp32sib = *(int*)(address + offsLocal); offsLocal += 4;
+                    baseVal = (ulong)(long)disp32sib;
+                }
+                else
+                {
+                    baseVal = *((&ctx->Rax) + baseReg);
+                }
+
+                ulong indexVal = 0;
+                if (idxBits != 0b100) // 0b100 => no index
+                {
+                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal <<= scaleBits; // scale = 1<<scaleBits
+                }
+
+                return baseVal + indexVal;
+            }
+
+            ulong ea = 0;
+
+            if (mod == 0b11)
+            {
+                // LEA does not allow mod==11 (register); treat as unsupported
+                Log("Unsupported LEA with mod==11 (register)", offs);
+                return false;
+            }
+
+            if (mod == 0b00 && (modrm & 0x7) == 0b101)
+            {
+                // RIP-relative disp32
+                int disp32 = *(int*)(address + offs); offs += 4;
+                ulong nextRip = ctx->Rip + (ulong)offs;
+                ea = nextRip + (ulong)(long)disp32;
+            }
+            else if ((modrm & 0x7) == 0b100)
+            {
+                // SIB (+ optional disp8/disp32)
+                byte sib = *(address + offs++);
+                ea = computeSibAddr(sib, mod, ref offs);
+                if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); ea += (ulong)disp8; }
+                else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; ea += (ulong)(long)disp32; }
+            }
+            else
+            {
+                // [base] [+ disp8/disp32]
+                ea = *((&ctx->Rax) + rm);
+                if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); ea += (ulong)disp8; }
+                else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; ea += (ulong)(long)disp32; }
+            }
+
+            ulong* dst = (&ctx->Rax) + reg;
+            *dst = ea;
+
+            Log($"LEA R{reg}, [..] => R{reg}=0x{ea:X}", offs);
+            ctx->Rip += (ulong)offs;
+            return true;
+        }
+        // --- generic: REX.W + 01 /r  => ADD r/m64, r64 ---
+        if (op2 == 0x01)
+        {
+            if ((rex & 0x08) == 0) // must be W=1
+            {
+                Log($"Unsupported REX(non-W) 0x48 0x01 (only W=1 supported)", 2);
+                return false;
+            }
+
+            int offs = 2;
+            byte modrm = *(address + offs++);
+            byte mod = (byte)((modrm >> 6) & 0x3);
+            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // source
+            int rm = (modrm & 0x7) | (B ? 8 : 0);         // dest
+
+            ulong* src = (&ctx->Rax) + reg;
+
+            if (mod == 0b11)
+            {
+                // ADD r64, r64
+                ulong* dst = (&ctx->Rax) + rm;
+                ulong old = *dst;
+                *dst = old + *src;
+
+                bool zf = (*dst == 0);
+                bool sf = ((*dst & (1UL << 63)) != 0);
+                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+
+                Log($"ADD R{rm}, R{reg} => 0x{old:X}+0x{*src:X}=0x{*dst:X}", offs);
+                ctx->Rip += (ulong)offs;
+                return true;
+            }
+            else
+            {
+                // memory form ADD [r/m64], r64
+                ulong memAddr = 0;
+
+                // basic address decoding (reuse your existing computeSibAddr helper)
+                if (mod == 0b00 && (modrm & 0x7) == 0b101)
+                {
+                    int disp32 = *(int*)(address + offs); offs += 4;
+                    ulong nextRip = ctx->Rip + (ulong)offs;
+                    memAddr = nextRip + (ulong)(long)disp32;
+                }
+                else if ((modrm & 0x7) == 0b100)
+                {
+                    byte sib = *(address + offs++);
+                    byte scale = (byte)((sib >> 6) & 0x3);
+                    byte index = (byte)((sib >> 3) & 0x7);
+                    byte baseReg = (byte)(sib & 0x7);
+                    ulong baseVal = *((&ctx->Rax) + baseReg);
+                    ulong indexVal = (index == 0b100) ? 0 : *((&ctx->Rax) + index) << scale;
+                    memAddr = baseVal + indexVal;
+                    if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8; }
+                    else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)disp32; }
+                }
+                else
+                {
+                    memAddr = *((&ctx->Rax) + rm);
+                    if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8; }
+                    else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)disp32; }
+                }
+
+                ulong old = *(ulong*)memAddr;
+                *(ulong*)memAddr = old + *src;
+
+                bool zf = (*(ulong*)memAddr == 0);
+                bool sf = ((*(ulong*)memAddr & (1UL << 63)) != 0);
+                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+
+                Log($"ADD QWORD PTR [0x{memAddr:X}], R{reg} => 0x{old:X}+0x{*src:X}=0x{*(ulong*)memAddr:X}", offs);
+                ctx->Rip += (ulong)offs;
+                return true;
+            }
+        }
+        if (op2 >= 0xB8 && op2 <= 0xBF)
+        {
+            int reg = (op2 - 0xB8) | (B ? 8 : 0);   // extend to R8..R15 if REX.B
+
+            if ((rex & 0x08) != 0) // REX.W=1  => MOV r64, imm64 (10 bytes total)
+            {
+                ulong imm64 = *(ulong*)(address + 2);
+                ulong* dst = (&ctx->Rax) + reg;
+                *dst = imm64;
+                Log($"MOV R{reg}, 0x{imm64:X}", 10);
+                ctx->Rip += 10;
+                return true;
+            }
+            else
+            {
+                // REX.W=0 => MOV r32, imm32; still allow REX.B to choose R8..R15
+                uint imm32 = *(uint*)(address + 2);
+                ulong* dst = (&ctx->Rax) + reg;
+                *dst = (ulong)imm32;                // zero-extend to 64-bit
+                Log($"MOV R{reg}, 0x{imm32:X8}", 6);
+                ctx->Rip += 6;
+                return true;
+            }
+        }
+        // REX.W + 05 imm32  => ADD RAX, imm32 (sign-extended)
+        if (op2 == 0x05)
+        {
+            if ((rex & 0x08) == 0)
+            { // W must be 1
+                Log("Unsupported REX(non-W) 0x48 0x05", 2);
+                return false;
+            }
+            int imm32 = *(int*)(address + 2);
+            ulong old = ctx->Rax;
+            ulong nw = old + (ulong)(long)imm32;  // sign-extend imm32
+            ctx->Rax = nw;
+
+            // minimal flags you already use in branches (ZF/SF)
+            bool zf = (nw == 0);
+            bool sf = (nw & (1UL << 63)) != 0;
+            ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+
+            Log($"ADD RAX, 0x{(uint)imm32:X8} (sext) => 0x{old:X}+0x{(ulong)(long)imm32:X}=0x{nw:X}", 6);
+            ctx->Rip += 6;
             return true;
         }
         Log($"Unsupported REX-prefixed opcode 0x48 0x{op2:X2} 0x{op3:X2}", 3);
