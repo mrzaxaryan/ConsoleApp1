@@ -67,8 +67,12 @@ public static unsafe class X64Emulator
                     result = HandleCall(ctx, address, Log); break;
                 case X64Opcodes.RET:
                     result = HandleRet(ctx, Log); break;
+                case 0xC9: // LEAVE
+                    result = HandleLeave(ctx, Log); break;
                 case X64Opcodes.JMP_SHORT:
                     result = HandleJmpShort(ctx, address, Log); break;
+                case 0x8B: // MOV r32/64, r/m32/64 (non-REX)
+                    result = HandleMovGvEv(ctx, address, Log); break;
                 case X64Opcodes.CMP_AL_IMM8:
                     result = HandleCmpAlImm8(ctx, address, Log); break;
                 // ... keep other cases as-is for now ...
@@ -143,6 +147,17 @@ public static unsafe class X64Emulator
         ctx->Rsp += 8;
         Log($"RET => RIP=0x{returnAddress:X}", 1);
         ctx->Rip = returnAddress;
+        return true;
+    }
+
+    private static bool HandleLeave(CONTEXT* ctx, Action<string, int> Log)
+    {
+        // LEAVE: MOV RSP, RBP; POP RBP
+        ctx->Rsp = ctx->Rbp;
+        ctx->Rbp = *(ulong*)ctx->Rsp;
+        ctx->Rsp += 8;
+        Log("LEAVE (MOV RSP, RBP; POP RBP)", 1);
+        ctx->Rip += 1;
         return true;
     }
 
@@ -597,7 +612,8 @@ public static unsafe class X64Emulator
                 ulong baseVal;
                 if (modLocal == 0b00 && baseBits == 0b101)
                 {
-                    int disp32 = *(int*)(address + offsLocal); offsLocal += 4;
+                    int disp32 = *(int*)(address + offsLocal);
+                    offsLocal += 4;
                     baseVal = (ulong)(long)disp32;
                 }
                 else
@@ -606,10 +622,10 @@ public static unsafe class X64Emulator
                 }
 
                 ulong indexVal = 0;
-                if (idxBits != 0b100)
+                if (idxBits != 0b100) // 0b100 => no index, REX.X ignored
                 {
                     indexVal = *((&ctx->Rax) + indexReg);
-                    indexVal <<= scaleBits; // 1<<scaleBits
+                    indexVal <<= scaleBits; // scale = 1<<scaleBits
                 }
                 return baseVal + indexVal;
             }
@@ -916,8 +932,7 @@ public static unsafe class X64Emulator
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) // 0b100 => no index, REX.X ignored
-                    indexReg |= (X ? 8 : 0);
+                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
 
                 int baseReg = baseBits | (B ? 8 : 0);
 
@@ -929,7 +944,10 @@ public static unsafe class X64Emulator
                     offsLocal += 4;
                     baseVal = (ulong)(long)disp32;
                 }
-                else baseVal = *((&ctx->Rax) + baseReg);
+                else
+                {
+                    baseVal = *((&ctx->Rax) + baseReg);
+                }
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100) // if there IS an index
@@ -1315,5 +1333,34 @@ public static unsafe class X64Emulator
     }
 
     // ...other opcode handlers can be extracted similarly...
+
+    private static bool HandleMovGvEv(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // MOV r32/64, r/m32/64 (non-REX)
+        byte modrm = *(address + 1);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        byte reg = (byte)((modrm >> 3) & 0x7); // destination register
+        byte rm = (byte)(modrm & 0x7);        // source
+        int offs = 2;
+        ulong value = 0;
+        string srcDesc;
+        if (mod == 0b11)
+        {
+            // Register to register
+            value = ((&ctx->Rax)[rm]);
+            srcDesc = $"R{rm}";
+        }
+        else
+        {
+            // Only simple [register] addressing for now
+            ulong addr = ((&ctx->Rax)[rm]);
+            value = *(ulong*)addr;
+            srcDesc = $"[0x{addr:X}]";
+        }
+        ((&ctx->Rax)[reg]) = value;
+        Log($"MOV R{reg}, {srcDesc} => R{reg}=0x{value:X}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
 }
 

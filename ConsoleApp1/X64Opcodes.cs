@@ -1,6 +1,7 @@
 ﻿public static class X64Opcodes
 {
     public const byte ADD_RM8_R8 = 0x00;
+    public const byte ADC_RM8_R8 = 0x10; // Added for ADC support
     public const byte JBE_SHORT = 0x76;
     public const byte NOP = 0x90;
     public const byte LEAVE = 0xC9;
