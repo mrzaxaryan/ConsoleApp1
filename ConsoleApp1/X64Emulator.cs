@@ -69,10 +69,11 @@ public static unsafe class X64Emulator
                     result = HandleRet(ctx, Log); break;
                 case 0xC9: // LEAVE
                     result = HandleLeave(ctx, Log); break;
+                case 0x8B:
+                    result = HandleMovR32Rm32(ctx, address, Log);
+                    break;
                 case X64Opcodes.JMP_SHORT:
                     result = HandleJmpShort(ctx, address, Log); break;
-                case 0x8B: // MOV r32/64, r/m32/64 (non-REX)
-                    result = HandleMovGvEv(ctx, address, Log); break;
                 case X64Opcodes.CMP_AL_IMM8:
                     result = HandleCmpAlImm8(ctx, address, Log); break;
                 // ... keep other cases as-is for now ...
@@ -139,6 +140,61 @@ public static unsafe class X64Emulator
         diff("R15", before.R15, after.R15);
         if (before.EFlags != after.EFlags) sb.Append($" EFlags:0x{before.EFlags:X}->0x{after.EFlags:X}");
         return sb.ToString();
+    }
+    private static bool HandleMovR32Rm32(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // MOV r32, r/m32  =>  8B /r
+        byte modrm = *(address + 1);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        byte reg = (byte)((modrm >> 3) & 0x7); // destination (r32)
+        byte rm = (byte)(modrm & 0x7);        // source (r/m32)
+        int offs = 2;
+
+        ulong memAddr = 0;
+        uint value;
+
+        if (mod == 0b11)
+        {
+            // Register to register
+            value = (uint)(((&ctx->Rax)[rm]) & 0xFFFFFFFF);
+            ((uint*)(&ctx->Rax))[reg] = value;
+            Log($"MOV R{reg}, R{rm} (32-bit) => 0x{value:X8}", offs);
+            ctx->Rip += (ulong)offs;
+            return true;
+        }
+
+        // Memory addressing
+        if (mod == 0b00)
+        {
+            // [reg]
+            memAddr = *((&ctx->Rax) + rm);
+        }
+        else if (mod == 0b01)
+        {
+            // [reg + disp8]
+            sbyte disp8 = *(sbyte*)(address + offs);
+            offs += 1;
+            memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+        }
+        else if (mod == 0b10)
+        {
+            // [reg + disp32]
+            int disp32 = *(int*)(address + offs);
+            offs += 4;
+            memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+        }
+        else
+        {
+            Log($"Unsupported MOV r32,[r/m32] Mod={mod}", offs);
+            return false;
+        }
+
+        value = *(uint*)memAddr;
+        ((uint*)(&ctx->Rax))[reg] = value;
+
+        Log($"MOV R{reg}, [0x{memAddr:X}] => R{reg}=0x{value:X8}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
     }
 
     private static bool HandleRet(CONTEXT* ctx, Action<string, int> Log)
@@ -1331,36 +1387,6 @@ public static unsafe class X64Emulator
         Log("Unhandled GS-prefixed opcode", 2);
         return false;
     }
-
-    // ...other opcode handlers can be extracted similarly...
-
-    private static bool HandleMovGvEv(CONTEXT* ctx, byte* address, Action<string, int> Log)
-    {
-        // MOV r32/64, r/m32/64 (non-REX)
-        byte modrm = *(address + 1);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7); // destination register
-        byte rm = (byte)(modrm & 0x7);        // source
-        int offs = 2;
-        ulong value = 0;
-        string srcDesc;
-        if (mod == 0b11)
-        {
-            // Register to register
-            value = ((&ctx->Rax)[rm]);
-            srcDesc = $"R{rm}";
-        }
-        else
-        {
-            // Only simple [register] addressing for now
-            ulong addr = ((&ctx->Rax)[rm]);
-            value = *(ulong*)addr;
-            srcDesc = $"[0x{addr:X}]";
-        }
-        ((&ctx->Rax)[reg]) = value;
-        Log($"MOV R{reg}, {srcDesc} => R{reg}=0x{value:X}", offs);
-        ctx->Rip += (ulong)offs;
-        return true;
-    }
+    
 }
 
