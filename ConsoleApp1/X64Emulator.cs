@@ -35,6 +35,10 @@ public static unsafe class X64Emulator
         {
             result = HandleSegmentPrefix(ctx, address, Log);
         }
+        else if(*address == 0x4C) // ???
+        {
+            result = Rex.Handle(ctx, address, Log);
+        }
         else
         {
             switch (*address)
@@ -111,7 +115,7 @@ public static unsafe class X64Emulator
                     result = false;
                     break;
             }
-        }
+        }       
         return result;
     }
     private static  bool HandleMovRm8Imm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
