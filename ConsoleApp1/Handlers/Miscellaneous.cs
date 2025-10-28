@@ -43,7 +43,8 @@ public static unsafe class Miscellaneous
             (of ? 0x800u : 0u)
         );
 
-        Log($"CMP AL, 0x{imm8:X2} => AL=0x{al:X2} result=0x{result:X2}", 2);
+        Log($"CMP AL, 0x{imm8:X2} => AL=0x{al:X2} result=0x{result:X2} [ZF={(zf ? 1 : 0)} SF={(sf ? 1 : 0)} CF={(cf ? 1 : 0)} OF={(of ? 1 : 0)} PF={(pf ? 1 : 0)} AF={(af ? 1 : 0)}]", 2);
+
         ctx->Rip += 2;
         return true;
     }
