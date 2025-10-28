@@ -1,4 +1,6 @@
-﻿using static X64Emulator;
+﻿using static ConsoleApp1.X64Emulator;
+
+namespace ConsoleApp1.Handlers;
 
 public static unsafe class Stack
 {
@@ -35,7 +37,7 @@ public static unsafe class Stack
         int reg = opcode - 0x58;            // 0..7 => RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI
         ulong val = *(ulong*)ctx->Rsp;      // read from stack
         ctx->Rsp += 8;                      // pop
-        *((&ctx->Rax) + reg) = val;         // write destination
+        *(&ctx->Rax + reg) = val;         // write destination
 
         Log($"POP R{reg}", 1);
         ctx->Rip += 1;

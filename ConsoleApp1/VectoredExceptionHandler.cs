@@ -1,7 +1,8 @@
-﻿using System;
+﻿using ConsoleApp1;
+using System;
 using System.Linq;
 using System.Runtime.InteropServices;
-using static X64Emulator;
+using static ConsoleApp1.X64Emulator;
 
 public static unsafe class VectoredExceptionHandler
 {

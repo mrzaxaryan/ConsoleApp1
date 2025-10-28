@@ -1,4 +1,6 @@
-﻿using static X64Emulator;
+﻿using static ConsoleApp1.X64Emulator;
+
+namespace ConsoleApp1.Handlers;
 
 public static unsafe class ControlFlow
 {
@@ -150,8 +152,8 @@ public static unsafe class ControlFlow
             case 0x7B: take = !PF; break;            // JNP / JPO
             case 0x7C: take = SF != OF; break;       // JL / JNGE
             case 0x7D: take = SF == OF; break;       // JGE / JNL
-            case 0x7E: take = ZF || (SF != OF); break; // JLE / JNG
-            case 0x7F: take = !ZF && (SF == OF); break; // JG / JNLE
+            case 0x7E: take = ZF || SF != OF; break; // JLE / JNG
+            case 0x7F: take = !ZF && SF == OF; break; // JG / JNLE
             default: Log($"Unhandled short jump opcode 0x{opcode:X2}", 2); return false;
         }
 

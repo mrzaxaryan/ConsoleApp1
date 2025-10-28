@@ -2,8 +2,8 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using static ConsoleApp1.X64Emulator;
 using static VectoredExceptionHandler;
-using static X64Emulator;
 unsafe class Program
 {
     static byte[] Build(int stackSize)

@@ -1,7 +1,9 @@
 ﻿using System;
 using System.IO;
 using System.Runtime.InteropServices;
-using static X64Emulator;
+using static ConsoleApp1.X64Emulator;
+
+namespace ConsoleApp1;
 
 public static unsafe class X64TwoByteOpcodes
 {
@@ -36,15 +38,15 @@ public static unsafe class X64TwoByteOpcodes
         // 0F 94 /r → SETZ r/m8
         int offs = 2;
         byte modrm = ip[offs++];
-        byte mod = (byte)((modrm >> 6) & 3);
-        int reg = (modrm >> 3) & 7; // condition selector for other SETcc variants, not used here
-        int rm = (modrm & 7);
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7; // condition selector for other SETcc variants, not used here
+        int rm = modrm & 7;
 
         ulong* R = &ctx->Rax;
 
         // Determine condition result
         bool condMet = false;
-        if (condition == "ZF") condMet = (ctx->EFlags & (1 << 6)) != 0; // Zero Flag
+        if (condition == "ZF") condMet = (ctx->EFlags & 1 << 6) != 0; // Zero Flag
 
         byte value = condMet ? (byte)1 : (byte)0;
         string destDesc;
@@ -73,9 +75,9 @@ public static unsafe class X64TwoByteOpcodes
         // ip[0]=0F, ip[1]=B6
         int offs = 2;
         byte modrm = ip[offs++];
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        int reg = (modrm >> 3) & 0x7; // dest (Ereg)
-        int rm = (modrm & 0x7);      // src
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        int reg = modrm >> 3 & 0x7; // dest (Ereg)
+        int rm = modrm & 0x7;      // src
         ulong* R = &ctx->Rax;
 
         byte value8;
@@ -143,9 +145,9 @@ public static unsafe class X64TwoByteOpcodes
         // 0F B7 /r → MOVZX r32/64, r/m16
         int offs = 2;
         byte modrm = ip[offs++];
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        int reg = (modrm >> 3) & 0x7;
-        int rm = (modrm & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        int reg = modrm >> 3 & 0x7;
+        int rm = modrm & 0x7;
         ulong* R = &ctx->Rax;
 
         ulong memAddr = 0;

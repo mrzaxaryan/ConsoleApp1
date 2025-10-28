@@ -1,6 +1,10 @@
 ﻿using System.Collections.Generic;
 using System.Text;
 using System.Runtime.InteropServices;
+using ConsoleApp1.Handlers;
+
+namespace ConsoleApp1;
+
 public static unsafe class X64Emulator
 {
     public static bool Emulate(ref EXCEPTION_POINTERS exceptionInfo, byte* address)
@@ -21,10 +25,10 @@ public static unsafe class X64Emulator
 
         byte opcode = *address;
 
-        if(Stack.Handle(opcode, ctx, address, Log))
+        if (Stack.Handle(opcode, ctx, address, Log))
             return true;
 
-        if(ControlFlow.Handle(opcode, ctx, address, Log))
+        if (ControlFlow.Handle(opcode, ctx, address, Log))
             return true;
 
 
@@ -127,8 +131,8 @@ public static unsafe class X64Emulator
     {
         int offs = 1; // opcode 0x03
         byte modrm = *(ip + offs++);
-        byte mod = (byte)((modrm >> 6) & 3);
-        int reg = (modrm >> 3) & 7; // destination
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7; // destination
         int rm = modrm & 7;         // source
         ulong* R = &ctx->Rax;
 
@@ -174,9 +178,9 @@ public static unsafe class X64Emulator
         // 66 39 /r  →  CMP r/m16, r16
         int offs = 2;
         byte modrm = ip[offs++];
-        byte mod = (byte)((modrm >> 6) & 3);
-        int reg = (modrm >> 3) & 7;   // source (r16)
-        int rm = (modrm & 7);        // destination (r/m16)
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7;   // source (r16)
+        int rm = modrm & 7;        // destination (r/m16)
         ulong* R = &ctx->Rax;
 
         ushort lhs;   // left = r/m16 (destination)
@@ -213,14 +217,14 @@ public static unsafe class X64Emulator
 
         // ---- Update flags ----
         const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
-        uint f = ctx->EFlags & ~((uint)(CF | PF | AF | ZF | SF | OF));
+        uint f = ctx->EFlags & ~(CF | PF | AF | ZF | SF | OF);
 
         if (lhs < rhs) f |= CF;
         if (result == 0) f |= ZF;
         if ((result & 0x8000) != 0) f |= SF;
-        if ((((lhs ^ rhs) & (lhs ^ result)) & 0x8000) != 0) f |= OF;
+        if (((lhs ^ rhs) & (lhs ^ result) & 0x8000) != 0) f |= OF;
         byte low = (byte)(result & 0xFF);
-        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0)
+        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0)
             f |= PF;
 
         ctx->EFlags = f;
@@ -236,9 +240,9 @@ public static unsafe class X64Emulator
         // FE /0 INC r/m8
         // FE /1 DEC r/m8
         byte modrm = *(address + 1);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        int regop = (modrm >> 3) & 0x7; // /digit selects op
-        int rm = (modrm & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        int regop = modrm >> 3 & 0x7; // /digit selects op
+        int rm = modrm & 0x7;
         int offs = 2;
 
         if (regop != 0 && regop != 1)
@@ -252,12 +256,12 @@ public static unsafe class X64Emulator
         byte* dstPtr;
         if (mod == 0b11)
         {
-            dstPtr = (byte*)((&ctx->Rax) + rm);
+            dstPtr = (byte*)(&ctx->Rax + rm);
         }
         else
         {
             // Simple [reg] only for now
-            addr = *((&ctx->Rax) + rm);
+            addr = *(&ctx->Rax + rm);
             dstPtr = (byte*)addr;
         }
 
@@ -275,14 +279,14 @@ public static unsafe class X64Emulator
         if (newVal == 0) f |= ZF;
         if ((newVal & 0x80) != 0) f |= SF;
         byte low = (byte)(newVal & 0xFF);
-        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0) f |= PF;
+        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0) f |= PF;
         // OF = set if signed overflow (old==0x7F for INC, 0x80 for DEC)
         if (regop == 0 && oldVal == 0x7F) f |= OF;
         if (regop == 1 && oldVal == 0x80) f |= OF;
         ctx->EFlags = f;
 
-        string opName = (regop == 0) ? "INC" : "DEC";
-        string dest = (mod == 0b11) ? $"R{rm}b" : $"BYTE PTR [0x{addr:X}]";
+        string opName = regop == 0 ? "INC" : "DEC";
+        string dest = mod == 0b11 ? $"R{rm}b" : $"BYTE PTR [0x{addr:X}]";
         Log($"{opName} {dest} => 0x{oldVal:X2}->0x{newVal:X2}", offs);
         ctx->Rip += (ulong)offs;
         return true;
@@ -294,35 +298,35 @@ public static unsafe class X64Emulator
         // /0 ADD, /1 OR, /2 ADC, /3 SBB, /4 AND, /5 SUB, /6 XOR, /7 CMP
         int offs = 1;
         byte modrm = *(address + offs++);
-        byte mod = (byte)((modrm >> 6) & 3);
-        int grp = (modrm >> 3) & 7;
+        byte mod = (byte)(modrm >> 6 & 3);
+        int grp = modrm >> 3 & 7;
         int rm = modrm & 7;
 
-        bool regDirect = (mod == 0b11);
+        bool regDirect = mod == 0b11;
         ulong memAddr = 0;
 
         // memory addressing (basic forms, same as your MOV handler)
         if (!regDirect)
         {
             if (mod == 0b00)
-                memAddr = *((&ctx->Rax) + rm);
+                memAddr = *(&ctx->Rax + rm);
             else if (mod == 0b01)
             {
                 sbyte disp8 = *(sbyte*)(address + offs++);
-                memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+                memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
             }
             else if (mod == 0b10)
             {
                 int disp32 = *(int*)(address + offs);
                 offs += 4;
-                memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+                memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
             }
         }
 
         sbyte imm8s = *(sbyte*)(address + offs++);
         uint imm32 = (uint)(int)imm8s; // sign-extended 8→32
 
-        uint* dst32 = regDirect ? (uint*)((&ctx->Rax) + rm) : (uint*)memAddr;
+        uint* dst32 = regDirect ? (uint*)(&ctx->Rax + rm) : (uint*)memAddr;
         uint lhs = *dst32, res = 0;
 
         const uint CF = 1, PF = 1 << 2, AF = 1 << 4, ZF = 1 << 6, SF = 1 << 7, OF = 1 << 11;
@@ -339,10 +343,10 @@ public static unsafe class X64Emulator
         void SetAdd(uint a, uint b, int cin, uint r)
         {
             f &= ~(CF | OF | ZF | SF | PF | AF);
-            ulong ua = a, ub = (ulong)b + (ulong)cin;
+            ulong ua = a, ub = b + (ulong)cin;
             if (ua + ub > 0xFFFFFFFF) f |= CF;
-            if ((((a ^ r) & (b ^ r)) & 0x80000000) != 0) f |= OF;
-            if ((((a & 0xF) + (b & 0xF) + (uint)cin) & 0x10) != 0) f |= AF;
+            if (((a ^ r) & (b ^ r) & 0x80000000) != 0) f |= OF;
+            if (((a & 0xF) + (b & 0xF) + (uint)cin & 0x10) != 0) f |= AF;
             if (r == 0) f |= ZF;
             if ((r & 0x80000000) != 0) f |= SF;
             byte lo = (byte)(r & 0xFF);
@@ -353,8 +357,8 @@ public static unsafe class X64Emulator
             f &= ~(CF | OF | ZF | SF | PF | AF);
             uint ub = b + (uint)bin;
             if (a < ub) f |= CF;
-            if ((((a ^ b) & (a ^ r)) & 0x80000000) != 0) f |= OF;
-            if ((((~(a ^ b)) & (a ^ r)) & 0x10) != 0) f |= AF;
+            if (((a ^ b) & (a ^ r) & 0x80000000) != 0) f |= OF;
+            if ((~(a ^ b) & (a ^ r) & 0x10) != 0) f |= AF;
             if (r == 0) f |= ZF;
             if ((r & 0x80000000) != 0) f |= SF;
             byte lo = (byte)(r & 0xFF);
@@ -387,13 +391,13 @@ public static unsafe class X64Emulator
     private static unsafe bool HandleTestRmR(CONTEXT* ctx, byte* address, int operandBitsOverride, Action<string, int> Log)
     {
         // Address may point to 0x66 or directly to opcode.
-        bool has66 = (*address == 0x66);
+        bool has66 = *address == 0x66;
         byte* p = has66 ? address + 1 : address; // p -> opcode (84/85)
 
         byte op = *p;            // 0x84 (byte) or 0x85 (word/dword/qword)
         byte modrm = *(p + 1);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        byte reg = (byte)(modrm >> 3 & 0x7);
         byte rm = (byte)(modrm & 0x7);
 
         // Check for a REX prefix immediately before 'op' (common in your decoder flow).
@@ -416,8 +420,8 @@ public static unsafe class X64Emulator
         bool rexB = (rex & 0x01) != 0;
 
         // Extend reg indices with REX
-        int dst = rexR ? (reg | 8) : reg;
-        int src = rexB ? (rm | 8) : rm;
+        int dst = rexR ? reg | 8 : reg;
+        int src = rexB ? rm | 8 : rm;
 
         // Decide operand size
         int bits;
@@ -455,8 +459,8 @@ public static unsafe class X64Emulator
             if (mod == 0b11)
             {
                 ulong s = R[src];
-                lhs = bits == 16 ? (s & 0xFFFFUL)
-                     : bits == 32 ? (s & 0xFFFF_FFFFUL)
+                lhs = bits == 16 ? s & 0xFFFFUL
+                     : bits == 32 ? s & 0xFFFF_FFFFUL
                      : s;
                 lhsDesc = $"R{src}";
             }
@@ -472,8 +476,8 @@ public static unsafe class X64Emulator
             }
 
             ulong d = R[dst];
-            rhs = bits == 16 ? (d & 0xFFFFUL)
-                 : bits == 32 ? (d & 0xFFFF_FFFFUL)
+            rhs = bits == 16 ? d & 0xFFFFUL
+                 : bits == 32 ? d & 0xFFFF_FFFFUL
                               : d;
             rhsDesc = $"R{dst}";
         }
@@ -498,16 +502,16 @@ public static unsafe class X64Emulator
 
         // SF (sign bit of the chosen width)
         int msb = bits - 1;
-        if (((result >> msb) & 1UL) != 0) ctx->EFlags |= SF;
+        if ((result >> msb & 1UL) != 0) ctx->EFlags |= SF;
 
         // PF (parity of low byte, even parity -> PF=1)
         byte low = (byte)(result & 0xFF);
         // 0x6996 parity trick: bit=1 for even parity
-        if (((0x6996 >> (low & 0x0F)) & 1) == 1)
+        if ((0x6996 >> (low & 0x0F) & 1) == 1)
         {
             // fold high nibble
-            byte folded = (byte)(low ^ (low >> 4));
-            if (((0x6996 >> (folded & 0x0F)) & 1) == 1) ctx->EFlags |= PF;
+            byte folded = (byte)(low ^ low >> 4);
+            if ((0x6996 >> (folded & 0x0F) & 1) == 1) ctx->EFlags |= PF;
         }
 
         // ----- Advance RIP & log -----
@@ -531,8 +535,8 @@ public static unsafe class X64Emulator
         if (ip[0] != 0x66 || ip[1] != 0x85) return false;
 
         byte modrm = ip[2];
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        int reg = (modrm >> 3) & 0x7;
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        int reg = modrm >> 3 & 0x7;
         int rm = modrm & 0x7;
         int len = 3;
 
@@ -547,7 +551,7 @@ public static unsafe class X64Emulator
         }
         else
         {
-            ulong addr = ((&ctx->Rax)[rm]);
+            ulong addr = (&ctx->Rax)[rm];
             lhs = *(ushort*)addr;
             rhs = (ushort)((&ctx->Rax)[reg] & 0xFFFF);
             Log($"TEST WORD PTR [0x{addr:X}], R{reg}w", len);
@@ -562,11 +566,11 @@ public static unsafe class X64Emulator
         f &= ~(CF | OF | ZF | SF | PF);
 
         if ((res & 0xFFFF) == 0) f |= ZF;
-        if (((res >> 15) & 1) != 0) f |= SF;
+        if ((res >> 15 & 1) != 0) f |= SF;
 
         // Simple parity of low byte:
         byte low = (byte)(res & 0xFF);
-        bool parity = (System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0;
+        bool parity = (System.Numerics.BitOperations.PopCount(low) & 1) == 0;
         if (parity) f |= PF;
 
         ctx->EFlags = f;
@@ -579,27 +583,27 @@ public static unsafe class X64Emulator
     private static bool HandleXorRvEv(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         byte modrm = *(address + 1);
-        byte mod = (byte)((modrm >> 6) & 3);
-        byte reg = (byte)((modrm >> 3) & 7);
+        byte mod = (byte)(modrm >> 6 & 3);
+        byte reg = (byte)(modrm >> 3 & 7);
         byte rm = (byte)(modrm & 7);
         ulong value;
 
         if (mod == 0b11)
         {
             // Register to register
-            ulong src = ((&ctx->Rax)[rm]);
-            ulong dst = ((&ctx->Rax)[reg]);
+            ulong src = (&ctx->Rax)[rm];
+            ulong dst = (&ctx->Rax)[reg];
             value = dst ^ src;
-            ((&ctx->Rax)[reg]) = value;
+            (&ctx->Rax)[reg] = value;
             Log($"XOR R{reg}, R{rm}", 2);
         }
         else
         {
             // Memory form (simplified)
-            ulong addr = ((&ctx->Rax)[rm]);
+            ulong addr = (&ctx->Rax)[rm];
             uint src = *(uint*)addr;
-            uint dst = (uint)((&ctx->Rax)[reg]);
-            ((&ctx->Rax)[reg]) = dst ^ src;
+            uint dst = (uint)(&ctx->Rax)[reg];
+            (&ctx->Rax)[reg] = dst ^ src;
             Log($"XOR R{reg}, [0x{addr:X}]", 2);
         }
 
@@ -611,31 +615,31 @@ public static unsafe class X64Emulator
     {
         int offs = 1;
         byte modrm = *(address + offs++);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        int reg = (modrm >> 3) & 0x7;
-        int rm = (modrm & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        int reg = modrm >> 3 & 0x7;
+        int rm = modrm & 0x7;
 
-        uint src = ((uint*)(&ctx->Rax))[reg];
+        uint src = ((uint*)&ctx->Rax)[reg];
         uint val;
 
         if (mod == 0b11)
         {
-            val = ((uint*)(&ctx->Rax))[rm];
+            val = ((uint*)&ctx->Rax)[rm];
         }
         else
         {
-            ulong memAddr = *((&ctx->Rax) + rm);
+            ulong memAddr = *(&ctx->Rax + rm);
             if (mod == 0b01) { long d8 = *(sbyte*)(address + offs++); memAddr += (ulong)d8; }
             else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)d32; }
             val = *(uint*)memAddr;
         }
 
         uint res = val & src;
-        bool zf = (res == 0);
-        bool sf = ((res & 0x80000000u) != 0);
-        ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+        bool zf = res == 0;
+        bool sf = (res & 0x80000000u) != 0;
+        ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
-        Log($"TEST {((mod == 0b11) ? $"R{rm}d" : "r/m32")}, R{reg}d => ZF={(zf ? 1 : 0)} SF={(sf ? 1 : 0)}", offs);
+        Log($"TEST {(mod == 0b11 ? $"R{rm}d" : "r/m32")}, R{reg}d => ZF={(zf ? 1 : 0)} SF={(sf ? 1 : 0)}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
@@ -653,9 +657,9 @@ public static unsafe class X64Emulator
         {
             int offs = 2; // at ModRM
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int regop = (modrm >> 3) & 0x7;   // must be /0
-            int rm = (modrm & 0x7);
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int regop = modrm >> 3 & 0x7;   // must be /0
+            int rm = modrm & 0x7;
 
             if (regop != 0)
             {
@@ -666,8 +670,8 @@ public static unsafe class X64Emulator
             // SIB helper (no REX here; it’s a legacy prefix)
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 ulong baseVal;
@@ -678,13 +682,13 @@ public static unsafe class X64Emulator
                 }
                 else
                 {
-                    baseVal = *((&ctx->Rax) + baseBits);
+                    baseVal = *(&ctx->Rax + baseBits);
                 }
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100) // 0b100 = no index
                 {
-                    indexVal = *((&ctx->Rax) + idxBits);
+                    indexVal = *(&ctx->Rax + idxBits);
                     indexVal <<= scaleBits; // scale = 1<<scaleBits
                 }
                 return baseVal + indexVal;
@@ -695,7 +699,7 @@ public static unsafe class X64Emulator
                 // register form: write low 16 bits of the target reg
                 ushort imm16 = *(ushort*)(address + offs); offs += 2;
                 // low 16 of (&Rax)[rm]
-                ushort* dst16 = (ushort*)((&ctx->Rax) + rm);
+                ushort* dst16 = (ushort*)(&ctx->Rax + rm);
                 *dst16 = imm16;
 
                 Log($"MOV R{rm}w, 0x{imm16:X4}", offs);
@@ -722,7 +726,7 @@ public static unsafe class X64Emulator
                     }
                     else
                     {
-                        memAddr = *((&ctx->Rax) + rm);
+                        memAddr = *(&ctx->Rax + rm);
                     }
                 }
                 else if (mod == 0b01) // disp8
@@ -736,7 +740,7 @@ public static unsafe class X64Emulator
                     else
                     {
                         long disp8 = *(sbyte*)(address + offs++);  // sign-extend
-                        memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+                        memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
                     }
                 }
                 else // mod == 0b10  disp32
@@ -750,7 +754,7 @@ public static unsafe class X64Emulator
                     else
                     {
                         int disp32 = *(int*)(address + offs); offs += 4;
-                        memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+                        memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
                     }
                 }
 
@@ -783,9 +787,9 @@ public static unsafe class X64Emulator
         // 66 3B /r → CMP r16, r/m16
         int offs = 2;
         byte modrm = ip[offs++];
-        byte mod = (byte)((modrm >> 6) & 3);
-        int reg = (modrm >> 3) & 7; // destination (r16)
-        int rm = (modrm & 7);      // source (r/m16)
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7; // destination (r16)
+        int rm = modrm & 7;      // source (r/m16)
         ulong* R = &ctx->Rax;
 
         ushort src, dst;
@@ -822,15 +826,15 @@ public static unsafe class X64Emulator
 
         // ---- update flags (Intel rules) ----
         const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
-        uint f = ctx->EFlags & ~((uint)(CF | PF | AF | ZF | SF | OF));
+        uint f = ctx->EFlags & ~(CF | PF | AF | ZF | SF | OF);
 
         if (dst < src) f |= CF;                               // borrow
         if (result == 0) f |= ZF;
         if ((result & 0x8000) != 0) f |= SF;
-        if ((((dst ^ src) & (dst ^ result)) & 0x8000) != 0) f |= OF;
+        if (((dst ^ src) & (dst ^ result) & 0x8000) != 0) f |= OF;
         // parity flag
         byte low = (byte)(result & 0xFF);
-        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0)
+        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0)
             f |= PF;
 
         ctx->EFlags = f;
@@ -845,9 +849,9 @@ public static unsafe class X64Emulator
         // 66 89 /r → MOV r/m16, r16
         int offs = 2;
         byte modrm = *(address + offs++);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        int reg = (modrm >> 3) & 0x7; // source
-        int rm = (modrm & 0x7);      // destination
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        int reg = modrm >> 3 & 0x7; // source
+        int rm = modrm & 0x7;      // destination
         ulong* R = &ctx->Rax;
 
         ushort srcVal = (ushort)(R[reg] & 0xFFFF);
@@ -857,7 +861,7 @@ public static unsafe class X64Emulator
         if (mod == 0b11)
         {
             // Register to register: overwrite low 16 bits only
-            R[rm] = (R[rm] & ~0xFFFFUL) | srcVal;
+            R[rm] = R[rm] & ~0xFFFFUL | srcVal;
             dstDesc = $"R{rm}w";
         }
         else
@@ -886,17 +890,17 @@ public static unsafe class X64Emulator
     }
 
 
-    private static unsafe bool HandleGrp1_EwIb(X64Emulator.CONTEXT* ctx, byte* address, Action<string, int> Log)
+    private static unsafe bool HandleGrp1_EwIb(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         // Encoding: 66 83 /r ib   ; /0 ADD, /1 OR, /2 ADC, /3 SBB, /4 AND, /5 SUB, /6 XOR, /7 CMP
         int offs = 2;                  // start at ModRM
         byte modrm = *(address + offs++);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        int grp = (modrm >> 3) & 0x7; // /digit
-        int rm = (modrm & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        int grp = modrm >> 3 & 0x7; // /digit
+        int rm = modrm & 0x7;
 
         // Addressing (reg or simple [reg]/[reg+disp])
-        bool regDirect = (mod == 0b11);
+        bool regDirect = mod == 0b11;
         ulong memAddr = 0;
 
         if (!regDirect)
@@ -905,17 +909,17 @@ public static unsafe class X64Emulator
             {
                 if (rm == 0b100) { byte sib = *(address + offs++); memAddr = ComputeSibAddr16(ctx, address, sib, mod, ref offs); }
                 else if (rm == 0b101) { int disp32 = *(int*)(address + offs); offs += 4; memAddr = (ulong)(long)disp32; }
-                else memAddr = *((&ctx->Rax) + rm);
+                else memAddr = *(&ctx->Rax + rm);
             }
             else if (mod == 0b01)
             {
                 if (rm == 0b100) { byte sib = *(address + offs++); memAddr = ComputeSibAddr16(ctx, address, sib, mod, ref offs); }
-                else { long d8 = *(sbyte*)(address + offs++); memAddr = *((&ctx->Rax) + rm) + (ulong)d8; }
+                else { long d8 = *(sbyte*)(address + offs++); memAddr = *(&ctx->Rax + rm) + (ulong)d8; }
             }
             else // 0b10
             {
                 if (rm == 0b100) { byte sib = *(address + offs++); int d32 = *(int*)(address + offs); offs += 4; memAddr = ComputeSibAddr16(ctx, address, sib, mod, ref offs) + (ulong)(long)d32; }
-                else { int d32 = *(int*)(address + offs); offs += 4; memAddr = *((&ctx->Rax) + rm) + (ulong)(long)d32; }
+                else { int d32 = *(int*)(address + offs); offs += 4; memAddr = *(&ctx->Rax + rm) + (ulong)(long)d32; }
             }
         }
 
@@ -924,7 +928,7 @@ public static unsafe class X64Emulator
         ushort imm16 = (ushort)(short)imm8s;
 
         // Load/store target
-        ushort* dst16 = regDirect ? (ushort*)((&ctx->Rax) + rm) : (ushort*)memAddr;
+        ushort* dst16 = regDirect ? (ushort*)(&ctx->Rax + rm) : (ushort*)memAddr;
         ushort lhs = *dst16, res = 0;
 
         // Flags
@@ -937,31 +941,31 @@ public static unsafe class X64Emulator
             if (r == 0) f |= ZF;
             if ((r & 0x8000) != 0) f |= SF;
             byte lo = (byte)(r & 0xFF);
-            if ((System.Numerics.BitOperations.PopCount((uint)lo) & 1) == 0) f |= PF;
+            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
         }
         void SetAdd(ushort a, ushort b, int cin, ushort r)
         {
             f &= ~(CF | OF | ZF | SF | PF | AF);
             uint ua = a, ub = (uint)(b + cin);
             if (ua + ub > 0xFFFF) f |= CF;
-            if ((((a ^ r) & (b ^ r)) & 0x8000) != 0) f |= OF;
-            if ((((a & 0xF) + (b & 0xF) + (uint)cin) & 0x10) != 0) f |= AF;
+            if (((a ^ r) & (b ^ r) & 0x8000) != 0) f |= OF;
+            if (((a & 0xF) + (b & 0xF) + (uint)cin & 0x10) != 0) f |= AF;
             if (r == 0) f |= ZF;
             if ((r & 0x8000) != 0) f |= SF;
             byte lo = (byte)(r & 0xFF);
-            if ((System.Numerics.BitOperations.PopCount((uint)lo) & 1) == 0) f |= PF;
+            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
         }
         void SetSub(ushort a, ushort b, int bin, ushort r)
         {
             f &= ~(CF | OF | ZF | SF | PF | AF);
             uint ub = (uint)(b + bin);
-            if ((uint)a < ub) f |= CF;                              // borrow -> CF=1
-            if ((((a ^ b) & (a ^ r)) & 0x8000) != 0) f |= OF;
-            if ((((~(a ^ b)) & (a ^ r)) & 0x10) != 0) f |= AF;    // Intel AF formula
+            if (a < ub) f |= CF;                              // borrow -> CF=1
+            if (((a ^ b) & (a ^ r) & 0x8000) != 0) f |= OF;
+            if ((~(a ^ b) & (a ^ r) & 0x10) != 0) f |= AF;    // Intel AF formula
             if (r == 0) f |= ZF;
             if ((r & 0x8000) != 0) f |= SF;
             byte lo = (byte)(r & 0xFF);
-            if ((System.Numerics.BitOperations.PopCount((uint)lo) & 1) == 0) f |= PF;
+            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
         }
 
         string mnem = grp switch { 0 => "ADD", 1 => "OR", 2 => "ADC", 3 => "SBB", 4 => "AND", 5 => "SUB", 6 => "XOR", 7 => "CMP", _ => "???" };
@@ -988,18 +992,18 @@ public static unsafe class X64Emulator
         // local SIB helper (16-bit op, but addressing is standard 64-bit)
         static ulong ComputeSibAddr16(CONTEXT* ctx, byte* baseAddr, byte sib, byte modLocal, ref int offsLocal)
         {
-            byte scaleBits = (byte)((sib >> 6) & 0x3);
-            byte idxBits = (byte)((sib >> 3) & 0x7);
+            byte scaleBits = (byte)(sib >> 6 & 0x3);
+            byte idxBits = (byte)(sib >> 3 & 0x7);
             byte baseBits = (byte)(sib & 0x7);
 
             ulong baseVal = 0;
             if (!(modLocal == 0b00 && baseBits == 0b101))
-                baseVal = *((&ctx->Rax) + baseBits);
+                baseVal = *(&ctx->Rax + baseBits);
 
             ulong indexVal = 0;
             if (idxBits != 0b100)
             {
-                indexVal = *((&ctx->Rax) + idxBits);
+                indexVal = *(&ctx->Rax + idxBits);
                 indexVal <<= scaleBits;
             }
 
@@ -1014,9 +1018,9 @@ public static unsafe class X64Emulator
     {
         int offs = 1; // opcode length (C6)
         byte modrm = ip[offs++];
-        byte mod = (byte)((modrm >> 6) & 3);
-        int reg = (modrm >> 3) & 7; // must be 0 for C6 /0
-        int rm = (modrm & 7);
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7; // must be 0 for C6 /0
+        int rm = modrm & 7;
 
         // Validate reg field (must be 0 for MOV r/m8, imm8)
         if (reg != 0)
@@ -1039,8 +1043,8 @@ public static unsafe class X64Emulator
         if (rm == 4)
         {
             byte sib = ip[offs++];
-            byte scale = (byte)((sib >> 6) & 3);
-            byte index = (byte)((sib >> 3) & 7);
+            byte scale = (byte)(sib >> 6 & 3);
+            byte index = (byte)(sib >> 3 & 7);
             byte baseReg = (byte)(sib & 7);
 
             addr = R[baseReg];
@@ -1087,7 +1091,7 @@ public static unsafe class X64Emulator
         }
 
         // --- Immediate 8-bit value ---
-        byte imm = *(byte*)(ip + offs);
+        byte imm = *(ip + offs);
         offs++;
 
         *(byte*)addr = imm;
@@ -1102,8 +1106,8 @@ public static unsafe class X64Emulator
     {
         // TEST r/m8, r8  => bitwise AND but no result stored
         byte modrm = *(address + 1);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        byte reg = (byte)(modrm >> 3 & 0x7);
         byte rm = (byte)(modrm & 0x7);
         int offs = 2;
 
@@ -1111,23 +1115,23 @@ public static unsafe class X64Emulator
 
         if (mod == 0b11)
         {
-            src = (byte)(((&ctx->Rax)[reg]) & 0xFF);
-            dst = (byte)(((&ctx->Rax)[rm]) & 0xFF);
+            src = (byte)((&ctx->Rax)[reg] & 0xFF);
+            dst = (byte)((&ctx->Rax)[rm] & 0xFF);
         }
         else
         {
-            ulong memAddr = *((&ctx->Rax) + rm);
+            ulong memAddr = *(&ctx->Rax + rm);
             dst = *(byte*)memAddr;
-            src = (byte)(((&ctx->Rax)[reg]) & 0xFF);
+            src = (byte)((&ctx->Rax)[reg] & 0xFF);
         }
 
         byte res = (byte)(src & dst);
-        bool zf = (res == 0);
+        bool zf = res == 0;
         bool sf = (res & 0x80) != 0;
 
-        ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) |
+        ctx->EFlags = ctx->EFlags & ~0xC0u |
                              (zf ? 0x40u : 0u) |
-                             (sf ? 0x80u : 0u));
+                             (sf ? 0x80u : 0u);
 
         Log($"TEST r/m8, r8 => (0x{dst:X2} & 0x{src:X2}) => ZF={(zf ? 1 : 0)} SF={(sf ? 1 : 0)}", offs);
         ctx->Rip += (ulong)offs;
@@ -1137,8 +1141,8 @@ public static unsafe class X64Emulator
     [StructLayout(LayoutKind.Sequential)]
     public struct EXCEPTION_POINTERS
     {
-        public IntPtr ExceptionRecord;
-        public IntPtr ContextRecord;
+        public nint ExceptionRecord;
+        public nint ContextRecord;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1171,9 +1175,24 @@ public static unsafe class X64Emulator
         {
             return new RegSnapshot
             {
-                Rax = ctx->Rax, Rbx = ctx->Rbx, Rcx = ctx->Rcx, Rdx = ctx->Rdx, Rsp = ctx->Rsp, Rbp = ctx->Rbp, Rsi = ctx->Rsi, Rdi = ctx->Rdi,
-                R8 = ctx->R8, R9 = ctx->R9, R10 = ctx->R10, R11 = ctx->R11, R12 = ctx->R12, R13 = ctx->R13, R14 = ctx->R14, R15 = ctx->R15,
-                EFlags = ctx->EFlags, Rip = ctx->Rip
+                Rax = ctx->Rax,
+                Rbx = ctx->Rbx,
+                Rcx = ctx->Rcx,
+                Rdx = ctx->Rdx,
+                Rsp = ctx->Rsp,
+                Rbp = ctx->Rbp,
+                Rsi = ctx->Rsi,
+                Rdi = ctx->Rdi,
+                R8 = ctx->R8,
+                R9 = ctx->R9,
+                R10 = ctx->R10,
+                R11 = ctx->R11,
+                R12 = ctx->R12,
+                R13 = ctx->R13,
+                R14 = ctx->R14,
+                R15 = ctx->R15,
+                EFlags = ctx->EFlags,
+                Rip = ctx->Rip
             };
         }
     }
@@ -1185,8 +1204,8 @@ public static unsafe class X64Emulator
         uint imm32 = *(uint*)(address + 1);
 
         // Write 64-bit with zero-extend semantics (writing r32 clears upper 32)
-        ulong* dst = (&ctx->Rax) + reg;
-        *dst = (ulong)imm32;
+        ulong* dst = &ctx->Rax + reg;
+        *dst = imm32;
 
         Log($"MOV R{reg}, 0x{imm32:X8}", 5);
         ctx->Rip += 5;
@@ -1205,13 +1224,13 @@ public static unsafe class X64Emulator
         if (before.EFlags != after.EFlags) sb.Append($" EFlags:0x{before.EFlags:X}->0x{after.EFlags:X}");
         return sb.ToString();
     }
-   
+
     private static bool HandleMovR32Rm32(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         // MOV r32, r/m32  =>  8B /r
         byte modrm = *(address + 1);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7); // destination (r32)
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        byte reg = (byte)(modrm >> 3 & 0x7); // destination (r32)
         byte rm = (byte)(modrm & 0x7);        // source (r/m32)
         int offs = 2;
 
@@ -1221,8 +1240,8 @@ public static unsafe class X64Emulator
         if (mod == 0b11)
         {
             // Register to register
-            value = (uint)(((&ctx->Rax)[rm]) & 0xFFFFFFFF);
-            ((uint*)(&ctx->Rax))[reg] = value;
+            value = (uint)((&ctx->Rax)[rm] & 0xFFFFFFFF);
+            ((uint*)&ctx->Rax)[reg] = value;
             Log($"MOV R{reg}, R{rm} (32-bit) => 0x{value:X8}", offs);
             ctx->Rip += (ulong)offs;
             return true;
@@ -1232,21 +1251,21 @@ public static unsafe class X64Emulator
         if (mod == 0b00)
         {
             // [reg]
-            memAddr = *((&ctx->Rax) + rm);
+            memAddr = *(&ctx->Rax + rm);
         }
         else if (mod == 0b01)
         {
             // [reg + disp8]
             sbyte disp8 = *(sbyte*)(address + offs);
             offs += 1;
-            memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+            memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
         }
         else if (mod == 0b10)
         {
             // [reg + disp32]
             int disp32 = *(int*)(address + offs);
             offs += 4;
-            memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+            memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
         }
         else
         {
@@ -1255,7 +1274,7 @@ public static unsafe class X64Emulator
         }
 
         value = *(uint*)memAddr;
-        ((uint*)(&ctx->Rax))[reg] = value;
+        ((uint*)&ctx->Rax)[reg] = value;
 
         Log($"MOV R{reg}, [0x{memAddr:X}] => R{reg}=0x{value:X8}", offs);
         ctx->Rip += (ulong)offs;
@@ -1269,7 +1288,7 @@ public static unsafe class X64Emulator
 
 
 
-   
+
 
 
     private static bool HandleCmpAlImm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
@@ -1277,9 +1296,9 @@ public static unsafe class X64Emulator
         byte imm8 = *(address + 1);
         byte al = (byte)(ctx->Rax & 0xFF);
         byte result = (byte)(al - imm8);
-        bool zf = (result == 0);
+        bool zf = result == 0;
         bool sf = (result & 0x80) != 0;
-        ctx->EFlags = (uint)((ctx->EFlags & ~0x85) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+        ctx->EFlags = (uint)(ctx->EFlags & ~0x85 | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
         Log($"CMP AL, 0x{imm8:X2}", 2);
         ctx->Rip += 2;
         return true;
@@ -1293,8 +1312,8 @@ public static unsafe class X64Emulator
     {
         // 48 83 /0 r/m64, imm8  (ADD)
         byte modrm = *(address + 2);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        byte reg = (byte)(modrm >> 3 & 0x7);
         byte rm = (byte)(modrm & 0x7);
         if (reg != 0)
         {
@@ -1308,16 +1327,16 @@ public static unsafe class X64Emulator
         // helper for SIB forms
         ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
         {
-            byte scaleBits = (byte)((sib >> 6) & 0x3);
-            byte idxBits = (byte)((sib >> 3) & 0x7);
+            byte scaleBits = (byte)(sib >> 6 & 0x3);
+            byte idxBits = (byte)(sib >> 3 & 0x7);
             byte baseBits = (byte)(sib & 0x7);
 
             ulong baseVal = 0, indexVal = 0;
             if (baseBits != 0b101)
-                baseVal = *((&ctx->Rax) + baseBits);
+                baseVal = *(&ctx->Rax + baseBits);
             if (idxBits != 0b100)
             {
-                indexVal = *((&ctx->Rax) + idxBits);
+                indexVal = *(&ctx->Rax + idxBits);
                 indexVal <<= scaleBits;
             }
 
@@ -1339,7 +1358,7 @@ public static unsafe class X64Emulator
         {
             // register form, e.g. ADD RAX, imm8
             byte imm8 = *(address + offs++);
-            ulong* dst = (&ctx->Rax) + rm;
+            ulong* dst = &ctx->Rax + rm;
             ulong old = *dst;
             *dst = old + imm8;
             Log($"ADD R{rm}, 0x{imm8:X2} => 0x{old:X}+0x{imm8:X}=0x{*dst:X}", offs);
@@ -1358,7 +1377,7 @@ public static unsafe class X64Emulator
                 }
                 else
                 {
-                    memAddr = *((&ctx->Rax) + rm);
+                    memAddr = *(&ctx->Rax + rm);
                 }
             }
             else if (mod == 0b01)
@@ -1371,7 +1390,7 @@ public static unsafe class X64Emulator
                 else
                 {
                     long disp8 = *(sbyte*)(address + offs++);
-                    memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+                    memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
                 }
             }
             else if (mod == 0b10)
@@ -1384,7 +1403,7 @@ public static unsafe class X64Emulator
                 else
                 {
                     int disp32 = *(int*)(address + offs); offs += 4;
-                    memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+                    memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
                 }
             }
 
@@ -1402,15 +1421,15 @@ public static unsafe class X64Emulator
     private static bool HandleAddRm8R8(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         byte modrm = *(address + 1);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        byte reg = (byte)(modrm >> 3 & 0x7);
         byte rm = (byte)(modrm & 0x7);
         int offs = 2;
         ulong memAddr = 0;
         byte* destPtr = null;
         if (mod == 0b11)
         {
-            destPtr = (byte*)((&ctx->Rax) + rm);
+            destPtr = (byte*)(&ctx->Rax + rm);
         }
         else
         {
@@ -1426,30 +1445,30 @@ public static unsafe class X64Emulator
                     else if (rm == 0b100)
                     {
                         byte sib = *(address + offs++);
-                        byte scale = (byte)((sib >> 6) & 0x3);
-                        byte index = (byte)((sib >> 3) & 0x7);
+                        byte scale = (byte)(sib >> 6 & 0x3);
+                        byte index = (byte)(sib >> 3 & 0x7);
                         byte baseReg = (byte)(sib & 0x7);
-                        ulong baseVal = (baseReg == 0b101) ? 0 : *((&ctx->Rax) + baseReg);
-                        ulong indexVal = (index == 0b100) ? 0 : (*((&ctx->Rax) + index) << scale);
-                        int disp32 = (baseReg == 0b101) ? *(int*)(address + offs) : 0;
-                        offs += (baseReg == 0b101) ? 4 : 0;
+                        ulong baseVal = baseReg == 0b101 ? 0 : *(&ctx->Rax + baseReg);
+                        ulong indexVal = index == 0b100 ? 0 : *(&ctx->Rax + index) << scale;
+                        int disp32 = baseReg == 0b101 ? *(int*)(address + offs) : 0;
+                        offs += baseReg == 0b101 ? 4 : 0;
                         memAddr = baseVal + indexVal + (ulong)disp32;
                     }
                     else
                     {
-                        memAddr = *((&ctx->Rax) + rm);
+                        memAddr = *(&ctx->Rax + rm);
                     }
                     destPtr = (byte*)memAddr;
                     break;
                 case 0b01:
                 case 0b10:
                     {
-                        int dispSize = (mod == 0b01) ? 1 : 4;
-                        long disp = (dispSize == 1)
+                        int dispSize = mod == 0b01 ? 1 : 4;
+                        long disp = dispSize == 1
                             ? *(sbyte*)(address + offs)
                             : *(int*)(address + offs);
                         offs += dispSize;
-                        ulong baseVal = *((&ctx->Rax) + rm);
+                        ulong baseVal = *(&ctx->Rax + rm);
                         memAddr = baseVal + (ulong)disp;
                         destPtr = (byte*)memAddr;
                     }
@@ -1459,14 +1478,14 @@ public static unsafe class X64Emulator
                     return false;
             }
         }
-        byte* srcPtr = (byte*)((&ctx->Rax) + reg);
+        byte* srcPtr = (byte*)(&ctx->Rax + reg);
         byte src = *srcPtr;
         byte dest = *destPtr;
         byte result = (byte)(dest + src);
         *destPtr = result;
-        bool zf = (result == 0);
+        bool zf = result == 0;
         bool sf = (result & 0x80) != 0;
-        ctx->EFlags = (uint)((ctx->EFlags & ~0x85) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+        ctx->EFlags = (uint)(ctx->EFlags & ~0x85 | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
         Log($"ADD r/m8, r8 => [0x{(ulong)destPtr:X}]=0x{result:X2}", offs);
         ctx->Rip += (ulong)offs;
         return true;
@@ -1512,22 +1531,22 @@ public static unsafe class X64Emulator
             byte prefix = *address; // 0x65 (GS)
                                     //    if (prefix != 0x65)
                                     //        return false;
-            // 65 48 8B 00  => MOV RAX, [GS:RAX]
-            // General pattern: 65 48 8B /r (modrm with mod==00)
+                                    // 65 48 8B 00  => MOV RAX, [GS:RAX]
+                                    // General pattern: 65 48 8B /r (modrm with mod==00)
             if (*next == 0x48 && *(next + 1) == 0x8B)
             {
                 byte modrm = *(next + 2);
-                byte mod = (byte)((modrm >> 6) & 3);
-                byte reg = (byte)((modrm >> 3) & 7);
+                byte mod = (byte)(modrm >> 6 & 3);
+                byte reg = (byte)(modrm >> 3 & 7);
                 byte rm = (byte)(modrm & 7);
 
                 if (mod == 0) // no displacement
                 {
                     ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
-                    var offset = ((&ctx->Rax)[rm]);
+                    var offset = (&ctx->Rax)[rm];
                     ulong addr = tebBase + offset;
                     ulong value = *(ulong*)addr;
-                    ((&ctx->Rax)[reg]) = value;
+                    (&ctx->Rax)[reg] = value;
 
                     Log($"MOV R{reg}, [GS:R{rm}] => R{reg}=0x{value:X} (addr=0x{addr:X}, GS=0x{tebBase:X})", 4);
                     ctx->Rip += 4;
@@ -1540,4 +1559,3 @@ public static unsafe class X64Emulator
         return false;
     }
 }
-

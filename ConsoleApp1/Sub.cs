@@ -1,4 +1,6 @@
-﻿using static X64Emulator;
+﻿using static ConsoleApp1.X64Emulator;
+
+namespace ConsoleApp1;
 
 internal static class Sub
 {
@@ -7,8 +9,8 @@ internal static class Sub
     {
         // 48 83 /5 r/m64, imm8 (SUB)
         byte modrm = *(address + 2);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7);
+        byte mod = (byte)(modrm >> 6 & 0x3);
+        byte reg = (byte)(modrm >> 3 & 0x7);
         byte rm = (byte)(modrm & 0x7);
         if (reg != 5)
         {
@@ -22,16 +24,16 @@ internal static class Sub
         // helper: compute SIB addressing
         ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
         {
-            byte scaleBits = (byte)((sib >> 6) & 0x3);
-            byte idxBits = (byte)((sib >> 3) & 0x7);
+            byte scaleBits = (byte)(sib >> 6 & 0x3);
+            byte idxBits = (byte)(sib >> 3 & 0x7);
             byte baseBits = (byte)(sib & 0x7);
             ulong baseVal = 0, indexVal = 0;
 
             if (baseBits != 0b101)
-                baseVal = *((&ctx->Rax) + baseBits);
+                baseVal = *(&ctx->Rax + baseBits);
             if (idxBits != 0b100)
             {
-                indexVal = *((&ctx->Rax) + idxBits);
+                indexVal = *(&ctx->Rax + idxBits);
                 indexVal <<= scaleBits;
             }
 
@@ -59,7 +61,7 @@ internal static class Sub
             }
             else
             {
-                memAddr = *((&ctx->Rax) + rm);
+                memAddr = *(&ctx->Rax + rm);
             }
         }
         else if (mod == 0b01)
@@ -72,7 +74,7 @@ internal static class Sub
             else
             {
                 long disp8 = *(sbyte*)(address + offs++);
-                memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+                memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
             }
         }
         else if (mod == 0b10)
@@ -85,7 +87,7 @@ internal static class Sub
             else
             {
                 int disp32 = *(int*)(address + offs); offs += 4;
-                memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+                memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
             }
         }
 

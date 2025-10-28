@@ -1,4 +1,5 @@
-﻿using static X64Emulator;
+﻿using ConsoleApp1;
+using static ConsoleApp1.X64Emulator;
 
 internal static class Rex
 {
