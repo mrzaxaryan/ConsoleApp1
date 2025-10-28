@@ -232,64 +232,147 @@ public static unsafe class ALUOperations
     }
     private static unsafe bool HandleGrp1_EdIb(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
-        // Encoding: 83 /digit r/m32, imm8
+        // Encoding family: 83 /digit r/m32, imm8
         // /0 ADD, /1 OR, /2 ADC, /3 SBB, /4 AND, /5 SUB, /6 XOR, /7 CMP
-        int offs = 1;
-        byte modrm = *(address + offs++);
-        byte mod = (byte)(modrm >> 6 & 3);
-        int grp = modrm >> 3 & 7;
-        int rm = modrm & 7;
 
-        bool regDirect = mod == 0b11;
-        ulong memAddr = 0;
+        int offs = 0;
 
-        // memory addressing (basic forms, same as your MOV handler)
+        // Optional REX prefix
+        byte rex = 0;
+        if ((address[offs] & 0xF0) == 0x40)
+            rex = address[offs++];
+
+        // Opcode must be 0x83
+        if (address[offs++] != 0x83)
+            return false;
+
+        bool R = (rex & 0x04) != 0; // extends ModRM.reg
+        bool X = (rex & 0x02) != 0; // extends SIB.index
+        bool B = (rex & 0x01) != 0; // extends ModRM.r/m (and SIB.base)
+
+        byte modrm = address[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int grp = (modrm >> 3) & 7;
+        int rm = (modrm & 7) | (B ? 8 : 0);
+        int reg = ((modrm >> 3) & 7) | (R ? 8 : 0);
+
+        ulong* R64 = &ctx->Rax;
+        ulong rip0 = ctx->Rip; // RIP at start of instruction
+
+        bool regDirect = (mod == 0b11);
+
+        // Effective address calculation (SIB + disp + RIP-relative)
+        ulong ea = 0;
+        string memDesc = string.Empty;
+        bool usedRipRel = false;
+
         if (!regDirect)
         {
-            if (mod == 0b00)
-                memAddr = *(&ctx->Rax + rm);
-            else if (mod == 0b01)
+            bool usesSib = ((modrm & 7) == 0b100);
+            if (mod == 0b00 && ((modrm & 7) == 0b101))
             {
-                sbyte disp8 = *(sbyte*)(address + offs++);
-                memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
+                // RIP-relative: disp32 + RIP_after_disp32
+                int disp32 = *(int*)(address + offs); offs += 4;
+                ulong ripAfter = rip0 + (ulong)(offs); // offs now points after disp32
+                ea = ripAfter + (ulong)(long)disp32;
+                usedRipRel = true;
+                memDesc = disp32 >= 0
+                    ? $"DWORD PTR [RIP+0x{(uint)disp32:X}]"
+                    : $"DWORD PTR [RIP-0x{(uint)(-disp32):X}]";
             }
-            else if (mod == 0b10)
+            else
             {
-                int disp32 = *(int*)(address + offs);
-                offs += 4;
-                memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
+                ulong baseVal = 0, indexVal = 0;
+                if (usesSib)
+                {
+                    byte sib = address[offs++];
+                    int scale = (sib >> 6) & 3;
+                    int idx = ((sib >> 3) & 7) | (X ? 8 : 0);
+                    int bas = (sib & 7) | (B ? 8 : 0);
+
+                    // Index "none" when idx == 4 and REX.X == 0
+                    bool indexNone = (((sib >> 3) & 7) == 0b100) && !X;
+                    if (!indexNone)
+                        indexVal = R64[idx] << scale;
+
+                    // Base “none” when mod==00 and base==101 (disp32 addressing)
+                    bool baseIsDisp32 = (mod == 0b00) && ((sib & 7) == 0b101);
+                    if (!baseIsDisp32)
+                        baseVal = R64[bas];
+
+                    ea = baseVal + indexVal;
+
+                    if (mod == 0b01)
+                    {
+                        long d8 = *(sbyte*)(address + offs); offs += 1;
+                        ea += (ulong)d8;
+                    }
+                    else if (mod == 0b10)
+                    {
+                        int d32 = *(int*)(address + offs); offs += 4;
+                        ea += (ulong)(long)d32;
+                    }
+                    else if (baseIsDisp32)
+                    {
+                        int d32 = *(int*)(address + offs); offs += 4;
+                        ea = (ulong)(long)d32; // absolute disp32 (no RIP-rel here)
+                    }
+                }
+                else
+                {
+                    ea = R64[rm];
+                    if (mod == 0b01)
+                    {
+                        long d8 = *(sbyte*)(address + offs); offs += 1;
+                        ea += (ulong)d8;
+                    }
+                    else if (mod == 0b10)
+                    {
+                        int d32 = *(int*)(address + offs); offs += 4;
+                        ea += (ulong)(long)d32;
+                    }
+                }
+
+                // Fallback description: resolved absolute address
+                if (string.IsNullOrEmpty(memDesc))
+                    memDesc = $"DWORD PTR [0x{ea:X}]";
             }
         }
 
+        // imm8 (sign-extended)
         sbyte imm8s = *(sbyte*)(address + offs++);
-        uint imm32 = (uint)(int)imm8s; // sign-extended 8→32
+        uint imm32 = (uint)(int)imm8s; // 8→32 sign extension
 
-        uint* dst32 = regDirect ? (uint*)(&ctx->Rax + rm) : (uint*)memAddr;
-        uint lhs = *dst32, res = 0;
+        // Destination view (r/m32 as uint)
+        uint* dst32 = regDirect ? (uint*)(R64 + rm) : (uint*)ea;
+        uint lhs = *dst32;
+        uint res = 0;
 
-        const uint CF = 1, PF = 1 << 2, AF = 1 << 4, ZF = 1 << 6, SF = 1 << 7, OF = 1 << 11;
+        // EFLAGS bits
+        const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
         uint f = ctx->EFlags;
 
+        // Helpers (keep AF undefined for logic ops by not touching it there)
         void SetLogic(uint r)
         {
             f &= ~(CF | OF | ZF | SF | PF);
             if (r == 0) f |= ZF;
             if ((r & 0x80000000) != 0) f |= SF;
-            byte lo = (byte)(r & 0xFF);
-            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
+            if ((System.Numerics.BitOperations.PopCount((byte)r) & 1) == 0) f |= PF;
         }
+
         void SetAdd(uint a, uint b, int cin, uint r)
         {
             f &= ~(CF | OF | ZF | SF | PF | AF);
-            ulong ua = a, ub = b + (ulong)cin;
-            if (ua + ub > 0xFFFFFFFF) f |= CF;
+            ulong ua = a, ub = (ulong)b + (uint)cin;
+            if (ua + ub > 0xFFFFFFFFUL) f |= CF;
             if (((a ^ r) & (b ^ r) & 0x80000000) != 0) f |= OF;
-            if (((a & 0xF) + (b & 0xF) + (uint)cin & 0x10) != 0) f |= AF;
+            if ((((a & 0xF) + (b & 0xF) + (uint)cin) & 0x10) != 0) f |= AF; // fixed precedence
             if (r == 0) f |= ZF;
             if ((r & 0x80000000) != 0) f |= SF;
-            byte lo = (byte)(r & 0xFF);
-            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
+            if ((System.Numerics.BitOperations.PopCount((byte)r) & 1) == 0) f |= PF;
         }
+
         void SetSub(uint a, uint b, int bin, uint r)
         {
             f &= ~(CF | OF | ZF | SF | PF | AF);
@@ -299,28 +382,95 @@ public static unsafe class ALUOperations
             if ((~(a ^ b) & (a ^ r) & 0x10) != 0) f |= AF;
             if (r == 0) f |= ZF;
             if ((r & 0x80000000) != 0) f |= SF;
-            byte lo = (byte)(r & 0xFF);
-            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
+            if ((System.Numerics.BitOperations.PopCount((byte)r) & 1) == 0) f |= PF;
         }
 
-        string mnem = grp switch { 0 => "ADD", 1 => "OR", 2 => "ADC", 3 => "SBB", 4 => "AND", 5 => "SUB", 6 => "XOR", 7 => "CMP", _ => "???" };
-        string dstName = regDirect ? $"R{rm}d" : $"DWORD PTR [0x{memAddr:X}]";
+        string mnem = grp switch
+        {
+            0 => "ADD",
+            1 => "OR",
+            2 => "ADC",
+            3 => "SBB",
+            4 => "AND",
+            5 => "SUB",
+            6 => "XOR",
+            7 => "CMP",
+            _ => "???"
+        };
 
+        string dstName = regDirect ? $"R{rm}d"
+                                   : (usedRipRel ? memDesc : $"DWORD PTR [0x{ea:X}]");
+
+        // Execute
         switch (grp)
         {
-            case 0: res = lhs + imm32; SetAdd(lhs, imm32, 0, res); *dst32 = res; break;
-            case 1: res = lhs | imm32; SetLogic(res); *dst32 = res; break;
-            case 2: { int c = (f & CF) != 0 ? 1 : 0; res = lhs + (uint)(imm32 + c); SetAdd(lhs, imm32, c, res); *dst32 = res; } break;
-            case 3: { int b = (f & CF) != 0 ? 1 : 0; res = lhs - (uint)(imm32 + b); SetSub(lhs, imm32, b, res); *dst32 = res; } break;
-            case 4: res = lhs & imm32; SetLogic(res); *dst32 = res; break;
-            case 5: res = lhs - imm32; SetSub(lhs, imm32, 0, res); *dst32 = res; break;
-            case 6: res = lhs ^ imm32; SetLogic(res); *dst32 = res; break;
-            case 7: res = lhs - imm32; SetSub(lhs, imm32, 0, res); break; // CMP
-            default: Log($"Unsupported 83 /{grp}", offs); return false;
+            case 0: // ADD
+                res = lhs + imm32;
+                SetAdd(lhs, imm32, 0, res);
+                if (regDirect) R64[rm] = (ulong)res; else *(uint*)ea = res; // zero-extend on reg
+                break;
+
+            case 1: // OR
+                res = lhs | imm32;
+                SetLogic(res);
+                if (regDirect) R64[rm] = (ulong)res; else *(uint*)ea = res;
+                break;
+
+            case 2: // ADC
+                {
+                    int c = (f & CF) != 0 ? 1 : 0; // use incoming CF
+                    uint addend = imm32 + (uint)c;
+                    res = lhs + addend;
+                    SetAdd(lhs, imm32, c, res);
+                    if (regDirect) R64[rm] = (ulong)res; else *(uint*)ea = res;
+                    break;
+                }
+
+            case 3: // SBB
+                {
+                    int b = (f & CF) != 0 ? 1 : 0; // incoming borrow = CF
+                    uint subtrahend = imm32 + (uint)b;
+                    res = lhs - subtrahend;
+                    SetSub(lhs, imm32, b, res);
+                    if (regDirect) R64[rm] = (ulong)res; else *(uint*)ea = res;
+                    break;
+                }
+
+            case 4: // AND
+                res = lhs & imm32;
+                SetLogic(res);
+                if (regDirect) R64[rm] = (ulong)res; else *(uint*)ea = res;
+                break;
+
+            case 5: // SUB
+                res = lhs - imm32;
+                SetSub(lhs, imm32, 0, res);
+                if (regDirect) R64[rm] = (ulong)res; else *(uint*)ea = res;
+                break;
+
+            case 6: // XOR
+                res = lhs ^ imm32;
+                SetLogic(res);
+                if (regDirect) R64[rm] = (ulong)res; else *(uint*)ea = res;
+                break;
+
+            case 7: // CMP
+                res = lhs - imm32;
+                SetSub(lhs, imm32, 0, res);
+                // no writeback
+                break;
+
+            default:
+                Log($"Unsupported 83 /{grp}", offs);
+                return false;
         }
 
         ctx->EFlags = f;
-        Log($"{mnem} {dstName}, 0x{imm32:X8}", offs);
+
+        // Log: show signed imm8 and its 32-bit sign-extended form
+        string immLog = $"{(int)imm8s} (0x{imm32:X8})";
+        Log($"{mnem} {dstName}, {immLog}", offs);
+
         ctx->Rip += (ulong)offs;
         return true;
     }
@@ -328,11 +478,22 @@ public static unsafe class ALUOperations
     {
         // FE /0 INC r/m8
         // FE /1 DEC r/m8
-        byte modrm = *(address + 1);
-        byte mod = (byte)(modrm >> 6 & 0x3);
-        int regop = modrm >> 3 & 0x7; // /digit selects op
-        int rm = modrm & 0x7;
-        int offs = 2;
+        int offs = 0;
+
+        // Handle optional REX prefix
+        byte rex = 0;
+        if ((address[offs] & 0xF0) == 0x40)
+            rex = address[offs++]; // consume REX
+
+        if (address[offs++] != 0xFE)
+            return false;
+
+        bool B = (rex & 0x01) != 0;
+
+        byte modrm = address[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int regop = (modrm >> 3) & 7;
+        int rm = (modrm & 7) | (B ? 8 : 0);
 
         if (regop != 0 && regop != 1)
         {
@@ -340,43 +501,63 @@ public static unsafe class ALUOperations
             return false;
         }
 
-        // Get operand location
+        ulong* R = &ctx->Rax;
         ulong addr = 0;
         byte* dstPtr;
+
         if (mod == 0b11)
         {
-            dstPtr = (byte*)(&ctx->Rax + rm);
+            // Register form (low 8 bits)
+            dstPtr = (byte*)(R + rm);
         }
         else
         {
-            // Simple [reg] only for now
-            addr = *(&ctx->Rax + rm);
+            // Memory form: simple [reg] + optional displacement
+            addr = R[rm];
+            if (mod == 0b01)
+            {
+                long d8 = *(sbyte*)(address + offs); offs += 1;
+                addr += (ulong)d8;
+            }
+            else if (mod == 0b10)
+            {
+                int d32 = *(int*)(address + offs); offs += 4;
+                addr += (ulong)(long)d32;
+            }
             dstPtr = (byte*)addr;
         }
 
         byte oldVal = *dstPtr;
-        byte newVal;
-        if (regop == 0) newVal = (byte)(oldVal + 1); // INC
-        else newVal = (byte)(oldVal - 1); // DEC
+        byte newVal = (byte)(regop == 0 ? oldVal + 1 : oldVal - 1);
         *dstPtr = newVal;
 
-        // Update flags (Intel rules)
-        uint f = ctx->EFlags;
+        // ---- Update flags ----
         const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
+        uint f = ctx->EFlags;
+
         // CF not affected
         f &= ~(ZF | SF | PF | OF | AF);
+
+        // ZF/SF/PF
         if (newVal == 0) f |= ZF;
         if ((newVal & 0x80) != 0) f |= SF;
-        byte low = (byte)(newVal & 0xFF);
-        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0) f |= PF;
-        // OF = set if signed overflow (old==0x7F for INC, 0x80 for DEC)
-        if (regop == 0 && oldVal == 0x7F) f |= OF;
-        if (regop == 1 && oldVal == 0x80) f |= OF;
+        if ((System.Numerics.BitOperations.PopCount((byte)newVal) & 1) == 0) f |= PF;
+
+        // AF
+        if (((oldVal ^ newVal) & 0x10) != 0) f |= AF;
+
+        // OF
+        if (regop == 0 && oldVal == 0x7F) f |= OF; // INC overflow
+        if (regop == 1 && oldVal == 0x80) f |= OF; // DEC overflow
+
         ctx->EFlags = f;
 
         string opName = regop == 0 ? "INC" : "DEC";
         string dest = mod == 0b11 ? $"R{rm}b" : $"BYTE PTR [0x{addr:X}]";
-        Log($"{opName} {dest} => 0x{oldVal:X2}->0x{newVal:X2}", offs);
+
+        Log($"{opName} {dest} => 0x{oldVal:X2}->0x{newVal:X2} "
+            + $"[ZF={(f & ZF) != 0}, SF={(f & SF) != 0}, OF={(f & OF) != 0}, AF={(f & AF) != 0}, PF={(f & PF) != 0}]", offs);
+
         ctx->Rip += (ulong)offs;
         return true;
     }
