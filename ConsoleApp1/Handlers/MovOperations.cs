@@ -20,7 +20,6 @@ public static unsafe class MovOperations
 
             // 0F-prefixed MOVZX handled in X64TwoByteOpcodes
             default:
-                Log($"Unhandled MOV opcode 0x{opcode:X2}", 8);
                 return false;
         }
     }
