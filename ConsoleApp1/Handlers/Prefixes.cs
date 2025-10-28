@@ -324,25 +324,25 @@ public static unsafe class Prefixes
 
         ushort result = (ushort)(dst - src);
 
-        // ---- update flags (Intel rules) ----
+        // ---- update flags ----
         const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
         uint f = ctx->EFlags & ~(CF | PF | AF | ZF | SF | OF);
 
-        if (dst < src) f |= CF;                               // borrow
+        if (dst < src) f |= CF;
         if (result == 0) f |= ZF;
         if ((result & 0x8000) != 0) f |= SF;
         if (((dst ^ src) & (dst ^ result) & 0x8000) != 0) f |= OF;
-        // parity flag
+        if (((dst ^ src ^ result) & 0x10) != 0) f |= AF; // added AF
         byte low = (byte)(result & 0xFF);
-        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0)
-            f |= PF;
+        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0) f |= PF;
 
         ctx->EFlags = f;
 
-        Log($"CMP {dstDesc}, {srcDesc} => result=0x{result:X4} ZF={((f & ZF) != 0 ? 1 : 0)} SF={((f & SF) != 0 ? 1 : 0)} CF={((f & CF) != 0 ? 1 : 0)}", offs);
+        Log($"CMP {dstDesc}, {srcDesc} => result=0x{result:X4} [ZF={(f & ZF) != 0}, SF={(f & SF) != 0}, CF={(f & CF) != 0}, OF={(f & OF) != 0}, PF={(f & PF) != 0}, AF={(f & AF) != 0}]", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
+
     private static unsafe bool HandleCmpEvGv16(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
         // 66 39 /r  →  CMP r/m16, r16
@@ -350,11 +350,11 @@ public static unsafe class Prefixes
         byte modrm = ip[offs++];
         byte mod = (byte)(modrm >> 6 & 3);
         int reg = modrm >> 3 & 7;   // source (r16)
-        int rm = modrm & 7;        // destination (r/m16)
+        int rm = modrm & 7;         // destination (r/m16)
         ulong* R = &ctx->Rax;
 
-        ushort lhs;   // left = r/m16 (destination)
-        ushort rhs;   // right = r16  (source)
+        ushort lhs;   // r/m16
+        ushort rhs;   // r16
         ulong addr = 0;
         string lhsDesc, rhsDesc;
 
@@ -376,6 +376,7 @@ public static unsafe class Prefixes
                 int d32 = *(int*)(ip + offs); offs += 4;
                 addr += (ulong)(long)d32;
             }
+
             lhs = *(ushort*)addr;
             lhsDesc = $"WORD PTR [0x{addr:X}]";
         }
@@ -393,6 +394,7 @@ public static unsafe class Prefixes
         if (result == 0) f |= ZF;
         if ((result & 0x8000) != 0) f |= SF;
         if (((lhs ^ rhs) & (lhs ^ result) & 0x8000) != 0) f |= OF;
+        if (((lhs ^ rhs ^ result) & 0x10) != 0) f |= AF; // added AF
         byte low = (byte)(result & 0xFF);
         if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0)
             f |= PF;
@@ -400,10 +402,11 @@ public static unsafe class Prefixes
         ctx->EFlags = f;
 
         Log($"CMP {lhsDesc}, {rhsDesc} => result=0x{result:X4} "
-            + $"ZF={((f & ZF) != 0 ? 1 : 0)} SF={((f & SF) != 0 ? 1 : 0)} CF={((f & CF) != 0 ? 1 : 0)}", offs);
+            + $"[ZF={(f & ZF) != 0}, SF={(f & SF) != 0}, CF={(f & CF) != 0}, OF={(f & OF) != 0}, PF={(f & PF) != 0}, AF={(f & AF) != 0}]", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
+
     private static unsafe bool HandleTestRmR(CONTEXT* ctx, byte* address, int operandBitsOverride, Action<string, int> Log)
     {
         // Address may point to 0x66 or directly to opcode.

@@ -1557,10 +1557,10 @@ internal static class Rex
         byte modrm = ip[offs++];
         byte mod = (byte)(modrm >> 6 & 3);
         int reg = modrm >> 3 & 7; // destination (r64)
-        int rm = modrm & 7;      // source (r/m64)
+        int rm = modrm & 7;       // source (r/m64)
         ulong* R = &ctx->Rax;
 
-        ulong lhs = R[reg]; // left operand
+        ulong lhs = R[reg];
         ulong rhs;
         ulong addr = 0;
         string srcDesc;
@@ -1594,21 +1594,24 @@ internal static class Rex
         const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
         uint f = ctx->EFlags & ~(CF | PF | AF | ZF | SF | OF);
 
-        if (lhs < rhs) f |= CF;                    // carry/borrow
+        if (lhs < rhs) f |= CF;
         if (result == 0) f |= ZF;
         if ((result & 0x8000_0000_0000_0000UL) != 0) f |= SF;
         if (((lhs ^ rhs) & (lhs ^ result) & 0x8000_0000_0000_0000UL) != 0) f |= OF;
+        if (((lhs ^ rhs ^ result) & 0x10) != 0) f |= AF; // Added AF
 
-        // Parity flag of low byte
+        // Parity of low byte
         byte low = (byte)(result & 0xFF);
         if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0)
             f |= PF;
 
         ctx->EFlags = f;
 
-        Log($"CMP R{reg}, {srcDesc} => result=0x{result:X} ZF={((f & ZF) != 0 ? 1 : 0)} SF={((f & SF) != 0 ? 1 : 0)} CF={((f & CF) != 0 ? 1 : 0)}", offs);
+        Log($"CMP R{reg}, {srcDesc} => result=0x{result:X16} "
+            + $"[ZF={(f & ZF) != 0}, SF={(f & SF) != 0}, CF={(f & CF) != 0}, OF={(f & OF) != 0}, PF={(f & PF) != 0}, AF={(f & AF) != 0}]", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
+
 
 }
