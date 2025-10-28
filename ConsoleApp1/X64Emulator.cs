@@ -60,6 +60,14 @@ public static unsafe class X64Emulator
         {
             return HandleOperandSizePrefix(ctx, address, Log);
         }
+        else if (*address >= 0x70 && *address <= 0x7F)
+        {
+            return HandleShortConditionalJump(ctx, address, Log);
+        }
+        else if (*address == 0x03)
+        {
+            return HandleAddGvEv(ctx, address, Log);
+        }
         else
         {
             switch (*address)
@@ -162,6 +170,98 @@ public static unsafe class X64Emulator
         }       
         return result;
     }
+    private static unsafe bool HandleAddGvEv(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        int offs = 1; // opcode 0x03
+        byte modrm = *(ip + offs++);
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = (modrm >> 3) & 7; // destination
+        int rm = modrm & 7;         // source
+        ulong* R = &ctx->Rax;
+
+        ulong value;
+        if (mod == 0b11)
+        {
+            // Register to register
+            value = R[reg] + R[rm];
+            Log($"ADD R{reg}, R{rm} => 0x{R[reg]:X}+0x{R[rm]:X}=0x{value:X}", offs);
+        }
+        else
+        {
+            // Memory source: [Rm] + possible displacement
+            ulong addr = R[rm];
+            if (mod == 0b01)
+            {
+                sbyte disp8 = *(sbyte*)(ip + offs++);
+                addr = (ulong)((long)addr + disp8);
+            }
+            else if (mod == 0b10)
+            {
+                int disp32 = *(int*)(ip + offs);
+                offs += 4;
+                addr = (ulong)((long)addr + disp32);
+            }
+
+            value = R[reg] + *(ulong*)addr;
+            Log($"ADD R{reg}, [0x{addr:X}] => 0x{R[reg]:X}+0x{*(ulong*)addr:X}=0x{value:X}", offs);
+        }
+
+        R[reg] = value;
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    private static unsafe bool HandleShortConditionalJump(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        byte opcode = *ip;        // 70..7F
+        sbyte rel8 = *(sbyte*)(ip + 1);
+        ulong nextRip = ctx->Rip + 2;
+        ulong target = (ulong)((long)nextRip + rel8);
+
+        bool take = false;
+        ulong eflags = ctx->EFlags;
+
+        bool CF = (eflags & 1) != 0;
+        bool PF = (eflags & 4) != 0;
+        bool ZF = (eflags & 0x40) != 0;
+        bool SF = (eflags & 0x80) != 0;
+        bool OF = (eflags & 0x800) != 0;
+
+        switch (opcode)
+        {
+            case 0x70: take = OF; break;             // JO
+            case 0x71: take = !OF; break;            // JNO
+            case 0x72: take = CF; break;             // JB / JC / JNAE
+            case 0x73: take = !CF; break;            // JNB / JAE / JNC
+            case 0x74: take = ZF; break;             // JE / JZ
+            case 0x75: take = !ZF; break;            // JNE / JNZ
+            case 0x76: take = CF || ZF; break;       // JBE / JNA
+            case 0x77: take = !CF && !ZF; break;     // JA / JNBE
+            case 0x78: take = SF; break;             // JS
+            case 0x79: take = !SF; break;            // JNS
+            case 0x7A: take = PF; break;             // JP / JPE
+            case 0x7B: take = !PF; break;            // JNP / JPO
+            case 0x7C: take = SF != OF; break;       // JL / JNGE
+            case 0x7D: take = SF == OF; break;       // JGE / JNL
+            case 0x7E: take = ZF || (SF != OF); break; // JLE / JNG
+            case 0x7F: take = !ZF && (SF == OF); break; // JG / JNLE
+            default: Log($"Unhandled short jump opcode 0x{opcode:X2}", 2); return false;
+        }
+
+        if (take)
+        {
+            Log($"Jcc taken: 0x{ctx->Rip:X} -> 0x{target:X}", 2);
+            ctx->Rip = target;
+        }
+        else
+        {
+            Log($"Jcc not taken (0x{opcode:X2}), RIP -> 0x{nextRip:X}", 2);
+            ctx->Rip = nextRip;
+        }
+
+        return true;
+    }
+
     private static unsafe bool HandleJmpNear(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         // E9 cd cd cd cd   ; rel32 is SIGNED
@@ -1159,54 +1259,95 @@ public static unsafe class X64Emulator
         }
     }
 
-
-    private static  bool HandleMovRm8Imm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    private static unsafe bool HandleMovRm8Imm8(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
-        byte modrm = *(address + 1);
-        byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7);   // must be 0 for MOV
-        byte rm = (byte)(modrm & 0x7);
-        int offs = 2;
+        int offs = 1; // opcode length (C6)
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = (modrm >> 3) & 7; // must be 0 for C6 /0
+        int rm = (modrm & 7);
 
+        // Validate reg field (must be 0 for MOV r/m8, imm8)
         if (reg != 0)
         {
-            Log($"Unsupported C6 /{reg} variant", offs);
+            Log($"Invalid reg field {reg} for MOV r/m8, imm8", offs);
             return false;
         }
 
-        byte imm8 = *(address + offs);
-        offs++;
+        ulong addr = 0;
+        ulong* R = &ctx->Rax;
 
+        // Register direct mode (mod == 11) is invalid for C6
         if (mod == 0b11)
         {
-            // register direct
-            byte* dst = (byte*)((&ctx->Rax) + rm);
-            *dst = imm8;
-            Log($"MOV R{rm}b, 0x{imm8:X2}", offs);
+            Log("Invalid: MOV r8, imm8 uses register mode", offs);
+            return false;
         }
-        else
+
+        // --- Handle SIB (rm == 100b) ---
+        if (rm == 4)
         {
-            // memory
-            ulong addr = *((&ctx->Rax) + rm);
+            byte sib = ip[offs++];
+            byte scale = (byte)((sib >> 6) & 3);
+            byte index = (byte)((sib >> 3) & 7);
+            byte baseReg = (byte)(sib & 7);
+
+            addr = R[baseReg];
+            if (index != 4) // 4 means "no index"
+                addr += R[index] << scale;
+
+            // Optional displacement
             if (mod == 0b01)
             {
-                long disp8 = *(sbyte*)(address + offs);
+                sbyte disp8 = *(sbyte*)(ip + offs);
                 offs++;
-                addr += (ulong)disp8;
+                addr = (ulong)((long)addr + disp8);
             }
             else if (mod == 0b10)
             {
-                int disp32 = *(int*)(address + offs);
+                int disp32 = *(int*)(ip + offs);
                 offs += 4;
-                addr += (ulong)(long)disp32;
+                addr = (ulong)((long)addr + disp32);
             }
-            *(byte*)addr = imm8;
-            Log($"MOV BYTE PTR [0x{addr:X}], 0x{imm8:X2}", offs);
+        }
+        else if (mod == 0b00 && rm == 0b101)
+        {
+            // disp32 absolute address (no base)
+            int disp32 = *(int*)(ip + offs);
+            offs += 4;
+            addr = (ulong)(long)disp32;
+        }
+        else
+        {
+            addr = R[rm];
+
+            if (mod == 0b01)
+            {
+                sbyte disp8 = *(sbyte*)(ip + offs);
+                offs++;
+                addr = (ulong)((long)addr + disp8);
+            }
+            else if (mod == 0b10)
+            {
+                int disp32 = *(int*)(ip + offs);
+                offs += 4;
+                addr = (ulong)((long)addr + disp32);
+            }
         }
 
+        // --- Immediate 8-bit value ---
+        byte imm = *(byte*)(ip + offs);
+        offs++;
+
+        *(byte*)addr = imm;
+
+        Log($"MOV BYTE PTR [0x{addr:X}], 0x{imm:X2}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
+
+
+
     private static bool HandlePopReg(CONTEXT* ctx, byte opcode, Action<string, int> Log)
     {
         int reg = opcode - 0x58;            // 0..7 => RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI

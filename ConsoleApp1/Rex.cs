@@ -1067,17 +1067,119 @@ internal static class Rex
             return true;
         }
 
-        // --- generic: REX.* + FF /r  => inc/dec/call/jmp/push on r/m(16|32|64).
-        // we only implement /2 = CALL r/m64 (and optional /4 = JMP r/m64).
-        if (op2 == 0xFF)
+        //// --- generic: REX.* + FF /r  => inc/dec/call/jmp/push on r/m(16|32|64).
+        //// we only implement /2 = CALL r/m64 (and optional /4 = JMP r/m64).
+        //if (op2 == 0xFF)
+        //{
+        //    int offs = 2; // includes REX + opcode
+        //    byte modrm = *(address + offs++);
+        //    byte mod = (byte)((modrm >> 6) & 0x3);
+        //    int grp = (modrm >> 3) & 0x7;         // /0..7
+        //    int rm = (modrm & 0x7) | (B ? 8 : 0);
+
+        //    ulong memAddr = 0;  // ← move declaration here so it’s visible later
+        //    ulong target;
+
+        //    ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
+        //    {
+        //        byte scaleBits = (byte)((sib >> 6) & 0x3);
+        //        byte idxBits = (byte)((sib >> 3) & 0x7);
+        //        byte baseBits = (byte)(sib & 0x7);
+
+        //        int indexReg = idxBits; if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+        //        int baseReg = baseBits | (B ? 8 : 0);
+
+        //        ulong baseVal;
+        //        if (modLocal == 0b00 && baseBits == 0b101)
+        //        {
+        //            int disp32sib = *(int*)(address + offsLocal);
+        //            offsLocal += 4;
+        //            baseVal = (ulong)(long)disp32sib;
+        //        }
+        //        else baseVal = *((&ctx->Rax) + baseReg);
+
+        //        ulong indexVal = 0;
+        //        if (idxBits != 0b100)
+        //        {
+        //            indexVal = *((&ctx->Rax) + indexReg);
+        //            indexVal <<= scaleBits;
+        //        }
+        //        return baseVal + indexVal;
+        //    }
+
+        //    // --- operand decoding ---
+        //    if (mod == 0b11)  // register operand
+        //    {
+        //        target = *((&ctx->Rax) + rm);
+        //    }
+        //    else
+        //    {
+        //        if (mod == 0b00 && ((modrm & 0x7) == 0b101))
+        //        {
+        //            int disp32 = *(int*)(address + offs);
+        //            offs += 4;
+        //            ulong nextRip = ctx->Rip + (ulong)offs;
+        //            memAddr = nextRip + (ulong)(long)disp32;
+        //        }
+        //        else if ((modrm & 0x7) == 0b100)
+        //        {
+        //            byte sib = *(address + offs++);
+        //            memAddr = computeSibAddr(sib, mod, ref offs);
+        //            if (mod == 0b01) { long d8 = *(sbyte*)(address + offs++); memAddr += (ulong)d8; }
+        //            else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)d32; }
+        //        }
+        //        else
+        //        {
+        //            memAddr = *((&ctx->Rax) + rm);
+        //            if (mod == 0b01) { long d8 = *(sbyte*)(address + offs++); memAddr += (ulong)d8; }
+        //            else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)d32; }
+        //        }
+
+        //        target = *(ulong*)memAddr;
+        //    }
+
+        //    // --- execute the grouped instruction ---
+        //    switch (grp)
+        //    {
+        //        case 2: // CALL r/m64
+        //            {
+        //                ulong ret = ctx->Rip + (ulong)offs;
+        //                ctx->Rsp -= 8;
+        //                *(ulong*)ctx->Rsp = ret;
+        //                Log($"CALL {((mod == 0b11) ? $"R{rm}" : $"[0x{memAddr:X}]")} => target=0x{target:X}, return=0x{ret:X}", offs);
+        //                ctx->Rip = target;
+        //                return true;
+        //            }
+        //        case 4: // JMP r/m64
+        //            {
+        //                Log($"JMP {((mod == 0b11) ? $"R{rm}" : $"[0x{memAddr:X}]")} => target=0x{target:X}", offs);
+        //                ctx->Rip = target;
+        //                return true;
+        //            }
+        //        case 6: // PUSH r/m64
+        //            {
+        //                ulong val = (mod == 0b11) ? *((&ctx->Rax) + rm) : *(ulong*)memAddr;
+        //                ctx->Rsp -= 8;
+        //                *(ulong*)ctx->Rsp = val;
+        //                Log($"PUSH {((mod == 0b11) ? $"R{rm}" : $"[0x{memAddr:X}]")} => value=0x{val:X}", offs);
+        //                ctx->Rip += (ulong)offs;
+        //                return true;
+        //            }
+        //        default:
+        //            Log($"Unsupported REX 0xFF /{grp}", offs);
+        //            return false;
+        //    }
+        //}
+
+        else if (op2 == 0xFF)
         {
             int offs = 2; // includes REX + opcode
             byte modrm = *(address + offs++);
             byte mod = (byte)((modrm >> 6) & 0x3);
-            int grp = (modrm >> 3) & 0x7;         // /0..7
+            int grp = (modrm >> 3) & 0x7; // /0..7
             int rm = (modrm & 0x7) | (B ? 8 : 0);
 
-            ulong memAddr = 0;  // ← move declaration here so it’s visible later
+            ulong memAddr = 0;
             ulong target;
 
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
@@ -1086,7 +1188,8 @@ internal static class Rex
                 byte idxBits = (byte)((sib >> 3) & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
-                int indexReg = idxBits; if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                int indexReg = idxBits;
+                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
                 int baseReg = baseBits | (B ? 8 : 0);
 
                 ulong baseVal;
@@ -1108,7 +1211,7 @@ internal static class Rex
             }
 
             // --- operand decoding ---
-            if (mod == 0b11)  // register operand
+            if (mod == 0b11)
             {
                 target = *((&ctx->Rax) + rm);
             }
@@ -1125,14 +1228,14 @@ internal static class Rex
                 {
                     byte sib = *(address + offs++);
                     memAddr = computeSibAddr(sib, mod, ref offs);
-                    if (mod == 0b01) { long d8 = *(sbyte*)(address + offs++); memAddr += (ulong)d8; }
-                    else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)d32; }
+                    if (mod == 0b01) { sbyte d8 = *(sbyte*)(address + offs++); memAddr = (ulong)((long)memAddr + d8); }
+                    else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr = (ulong)((long)memAddr + d32); }
                 }
                 else
                 {
                     memAddr = *((&ctx->Rax) + rm);
-                    if (mod == 0b01) { long d8 = *(sbyte*)(address + offs++); memAddr += (ulong)d8; }
-                    else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)d32; }
+                    if (mod == 0b01) { sbyte d8 = *(sbyte*)(address + offs++); memAddr = (ulong)((long)memAddr + d8); }
+                    else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr = (ulong)((long)memAddr + d32); }
                 }
 
                 target = *(ulong*)memAddr;
@@ -1141,6 +1244,40 @@ internal static class Rex
             // --- execute the grouped instruction ---
             switch (grp)
             {
+                case 0: // INC r/m64
+                    {
+                        if (mod == 0b11)
+                        {
+                            ((&ctx->Rax)[rm])++;
+                            Log($"INC R{rm}", offs);
+                        }
+                        else
+                        {
+                            ulong val = *(ulong*)memAddr + 1;
+                            *(ulong*)memAddr = val;
+                            Log($"INC [0x{memAddr:X}] => 0x{val:X}", offs);
+                        }
+                        ctx->Rip += (ulong)offs;
+                        return true;
+                    }
+
+                case 1: // DEC r/m64
+                    {
+                        if (mod == 0b11)
+                        {
+                            ((&ctx->Rax)[rm])--;
+                            Log($"DEC R{rm}", offs);
+                        }
+                        else
+                        {
+                            ulong val = *(ulong*)memAddr - 1;
+                            *(ulong*)memAddr = val;
+                            Log($"DEC [0x{memAddr:X}] => 0x{val:X}", offs);
+                        }
+                        ctx->Rip += (ulong)offs;
+                        return true;
+                    }
+
                 case 2: // CALL r/m64
                     {
                         ulong ret = ctx->Rip + (ulong)offs;
@@ -1150,12 +1287,14 @@ internal static class Rex
                         ctx->Rip = target;
                         return true;
                     }
+
                 case 4: // JMP r/m64
                     {
                         Log($"JMP {((mod == 0b11) ? $"R{rm}" : $"[0x{memAddr:X}]")} => target=0x{target:X}", offs);
                         ctx->Rip = target;
                         return true;
                     }
+
                 case 6: // PUSH r/m64
                     {
                         ulong val = (mod == 0b11) ? *((&ctx->Rax) + rm) : *(ulong*)memAddr;
@@ -1165,6 +1304,7 @@ internal static class Rex
                         ctx->Rip += (ulong)offs;
                         return true;
                     }
+
                 default:
                     Log($"Unsupported REX 0xFF /{grp}", offs);
                     return false;
@@ -1275,6 +1415,7 @@ internal static class Rex
         {
             return HandleXorEvGv(ctx, address, Log);
         }
+
         Log($"Unsupported REX-prefixed opcode 0x48 0x{op2:X2} 0x{op3:X2}", 3);
         return false;
     }
