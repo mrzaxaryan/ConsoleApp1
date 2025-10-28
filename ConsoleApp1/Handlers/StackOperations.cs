@@ -2,12 +2,13 @@
 
 namespace ConsoleApp1.Handlers;
 
-public static unsafe class Stack
+public static unsafe class StackOperations
 {
     public static bool Handle(byte opcode, CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         switch (opcode)
         {
+            // PUSH instructions
             case X64Opcodes.PUSH_RAX: return HandlePushRax(ctx, Log);
             case X64Opcodes.PUSH_RCX: return HandlePushRcx(ctx, Log);
             case X64Opcodes.PUSH_RDX: return HandlePushRdx(ctx, Log);
@@ -17,6 +18,7 @@ public static unsafe class Stack
             case X64Opcodes.PUSH_RSI: return HandlePushRsi(ctx, Log);
             case X64Opcodes.PUSH_RDI: return HandlePushRdi(ctx, Log);
 
+            // POP instructions
             case X64Opcodes.POP_RAX:
             case X64Opcodes.POP_RCX:
             case X64Opcodes.POP_RDX:
@@ -28,8 +30,7 @@ public static unsafe class Stack
                 return HandlePopReg(ctx, opcode, Log);
 
             default:
-                Log($"Unhandled stack opcode 0x{opcode:X2}", 8);
-                return false;
+                return false; // not stack-related
         }
     }
     private static bool HandlePopReg(CONTEXT* ctx, byte opcode, Action<string, int> Log)

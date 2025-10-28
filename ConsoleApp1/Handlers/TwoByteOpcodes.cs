@@ -3,9 +3,9 @@ using System.IO;
 using System.Runtime.InteropServices;
 using static ConsoleApp1.X64Emulator;
 
-namespace ConsoleApp1;
+namespace ConsoleApp1.Handlers;
 
-public static unsafe class X64TwoByteOpcodes
+public static unsafe class TwoByteOpcodes
 {
     public static bool Handle(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
