@@ -16,12 +16,33 @@ public static unsafe class X64Emulator
             string diff = FormatRegisterDiff(before, afterSnap);
             string currentLog = $"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " =>" + diff : "")}";
             Console.WriteLine(currentLog);
+            File.AppendAllText("emulator_log.txt", currentLog + Environment.NewLine);
         }
 
-        bool result;
-        if (*address == 0x0F && *(address + 1) == 0xB6)
+        bool result = false;
+        
+        if (*address == 0x0F)
         {
-            result = HandleMovzxR32Rm8(ctx, address, Log);
+            byte op = *(address + 1);
+            switch (op)
+            {
+                case 0x85: // JNE rel32
+                    return HandleJneNear(ctx, address, Log);
+
+                case 0x84: // JE rel32
+                    return HandleJeNear(ctx, address, Log);
+
+                case 0xB7: // MOVZX r32/64, r/m16
+                    return HandleMovzxGvEw(ctx, address, Log);
+
+                case 0xB6: // MOVZX r32/64, r/m8
+                    return HandleMovzxR32Rm8(ctx, address, Log);
+                case 0x94: // SETZ / SETE
+                    return HandleSetcc(ctx, address, Log, condition: "ZF");
+                default:
+                    Log($"Unsupported two-byte opcode 0F {op:X2}", 8);
+                    throw new NotImplementedException($"0F {op:X2} not implemented");
+            }
         }
         else if (*address == 0x48 && *(address + 1) == 0x83 && *(address + 2) == 0xAC && *(address + 3) == 0x24)
         {
@@ -35,14 +56,16 @@ public static unsafe class X64Emulator
         {
             result = HandleSegmentPrefix(ctx, address, Log);
         }
-        else if(*address == 0x4C) // ???
+        else if (*address == 0x66)  // operand-size override
         {
-            result = Rex.Handle(ctx, address, Log);
+            return HandleOperandSizePrefix(ctx, address, Log);
         }
         else
         {
             switch (*address)
             {
+                //case 0x85: // TEST r/m32 or r/m64 (with REX.W)
+                //    return HandleTestRmR(ctx, address, operandBitsOverride: 0, Log);
                 case 0x58: // POP RAX
                 case 0x59: // POP RCX
                 case 0x5A: // POP RDX
@@ -75,11 +98,15 @@ public static unsafe class X64Emulator
                 case X64Opcodes.NOP:
                     result = HandleNop(ctx, Log); break;
                 case X64Opcodes.PUSH_RBP:
-                    result = HandlePushRbp(ctx, Log); break;
+                    {
+                        //Log("Detected function prologue", 256);
+                        result = HandlePushRbp(ctx, Log); break;
+                    }
+                case 0x4C:
+                case 0x49:               
+                case X64Opcodes.REX_B_GROUP:
                 case X64Opcodes.REX_PREFIX:
                     result = Rex.Handle(ctx, address, Log); break;
-                case X64Opcodes.REX_B_GROUP:
-                    result = HandleRexBGroup(ctx, address, Log); break;
                 case X64Opcodes.PUSH_RDI:
                     result = HandlePushRdi(ctx, Log); break;
                 case X64Opcodes.PUSH_RSI:
@@ -109,6 +136,23 @@ public static unsafe class X64Emulator
                 case 0xC6:
                     result = HandleMovRm8Imm8(ctx, address, Log);
                     break;
+                case 0x85:
+                    result = HandleTestRm32R32(ctx, address, Log);
+                    break;
+                case 0x33: 
+                    result = HandleXorRvEv(ctx, address, Log);
+                    break;
+                case 0x77: // JA short (JNBE)
+                    result = HandleJaShort(ctx, address, Log); break;
+                case 0x83:
+                    result = HandleGrp1_EdIb(ctx, address, Log);
+                    break;
+                case 0xFE:
+                    result = HandleIncDecRm8(ctx, address, Log);
+                    break;
+                case 0xE9: // JMP rel32 (near)
+                    result = HandleJmpNear(ctx, address, Log);
+                    break;
                 // ... keep other cases as-is for now ...
                 default:
                     Log($"Unsupported opcode 0x{*address:X2}", 32);
@@ -118,6 +162,1004 @@ public static unsafe class X64Emulator
         }       
         return result;
     }
+    private static unsafe bool HandleJmpNear(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // E9 cd cd cd cd   ; rel32 is SIGNED
+        int rel32 = *(int*)(address + 1);
+        ulong nextRip = ctx->Rip + 5;                       // length = 5 bytes
+        ulong target = nextRip + (ulong)(long)rel32;       // sign-extend to 64-bit
+
+        Log($"JMP near {rel32:+#;-#;0} -> 0x{target:X}", 5);
+        ctx->Rip = target;
+        return true;
+    }
+    private static unsafe bool HandleSetcc(CONTEXT* ctx, byte* ip, Action<string, int> Log, string condition)
+    {
+        // 0F 94 /r → SETZ r/m8
+        int offs = 2;
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = (modrm >> 3) & 7; // condition selector for other SETcc variants, not used here
+        int rm = (modrm & 7);
+
+        ulong* R = &ctx->Rax;
+
+        // Determine condition result
+        bool condMet = false;
+        if (condition == "ZF") condMet = (ctx->EFlags & (1 << 6)) != 0; // Zero Flag
+
+        byte value = condMet ? (byte)1 : (byte)0;
+        string destDesc;
+
+        if (mod == 0b11)
+        {
+            // register
+            byte* dst = (byte*)(R + rm);
+            *dst = value;
+            destDesc = $"R{rm}b";
+        }
+        else
+        {
+            // simple [register] memory
+            ulong addr = R[rm];
+            *(byte*)addr = value;
+            destDesc = $"BYTE PTR [0x{addr:X}]";
+        }
+
+        Log($"SETZ {destDesc} => {(condMet ? "1" : "0")}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    private static unsafe bool HandleCmpEvGv16(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        // 66 39 /r  →  CMP r/m16, r16
+        int offs = 2;
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = (modrm >> 3) & 7;   // source (r16)
+        int rm = (modrm & 7);        // destination (r/m16)
+        ulong* R = &ctx->Rax;
+
+        ushort lhs;   // left = r/m16 (destination)
+        ushort rhs;   // right = r16  (source)
+        ulong addr = 0;
+        string lhsDesc, rhsDesc;
+
+        if (mod == 0b11)
+        {
+            lhs = (ushort)(R[rm] & 0xFFFF);
+            lhsDesc = $"R{rm}w";
+        }
+        else
+        {
+            addr = R[rm];
+            if (mod == 0b01)
+            {
+                long d8 = *(sbyte*)(ip + offs); offs += 1;
+                addr += (ulong)d8;
+            }
+            else if (mod == 0b10)
+            {
+                int d32 = *(int*)(ip + offs); offs += 4;
+                addr += (ulong)(long)d32;
+            }
+            lhs = *(ushort*)addr;
+            lhsDesc = $"WORD PTR [0x{addr:X}]";
+        }
+
+        rhs = (ushort)(R[reg] & 0xFFFF);
+        rhsDesc = $"R{reg}w";
+
+        ushort result = (ushort)(lhs - rhs);
+
+        // ---- Update flags ----
+        const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
+        uint f = ctx->EFlags & ~((uint)(CF | PF | AF | ZF | SF | OF));
+
+        if (lhs < rhs) f |= CF;
+        if (result == 0) f |= ZF;
+        if ((result & 0x8000) != 0) f |= SF;
+        if ((((lhs ^ rhs) & (lhs ^ result)) & 0x8000) != 0) f |= OF;
+        byte low = (byte)(result & 0xFF);
+        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0)
+            f |= PF;
+
+        ctx->EFlags = f;
+
+        Log($"CMP {lhsDesc}, {rhsDesc} => result=0x{result:X4} "
+            + $"ZF={((f & ZF) != 0 ? 1 : 0)} SF={((f & SF) != 0 ? 1 : 0)} CF={((f & CF) != 0 ? 1 : 0)}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    private static unsafe bool HandleIncDecRm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // FE /0 INC r/m8
+        // FE /1 DEC r/m8
+        byte modrm = *(address + 1);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        int regop = (modrm >> 3) & 0x7; // /digit selects op
+        int rm = (modrm & 0x7);
+        int offs = 2;
+
+        if (regop != 0 && regop != 1)
+        {
+            Log($"Unsupported FE /{regop}", offs);
+            return false;
+        }
+
+        // Get operand location
+        ulong addr = 0;
+        byte* dstPtr;
+        if (mod == 0b11)
+        {
+            dstPtr = (byte*)((&ctx->Rax) + rm);
+        }
+        else
+        {
+            // Simple [reg] only for now
+            addr = *((&ctx->Rax) + rm);
+            dstPtr = (byte*)addr;
+        }
+
+        byte oldVal = *dstPtr;
+        byte newVal;
+        if (regop == 0) newVal = (byte)(oldVal + 1); // INC
+        else newVal = (byte)(oldVal - 1); // DEC
+        *dstPtr = newVal;
+
+        // Update flags (Intel rules)
+        uint f = ctx->EFlags;
+        const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
+        // CF not affected
+        f &= ~(ZF | SF | PF | OF | AF);
+        if (newVal == 0) f |= ZF;
+        if ((newVal & 0x80) != 0) f |= SF;
+        byte low = (byte)(newVal & 0xFF);
+        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0) f |= PF;
+        // OF = set if signed overflow (old==0x7F for INC, 0x80 for DEC)
+        if (regop == 0 && oldVal == 0x7F) f |= OF;
+        if (regop == 1 && oldVal == 0x80) f |= OF;
+        ctx->EFlags = f;
+
+        string opName = (regop == 0) ? "INC" : "DEC";
+        string dest = (mod == 0b11) ? $"R{rm}b" : $"BYTE PTR [0x{addr:X}]";
+        Log($"{opName} {dest} => 0x{oldVal:X2}->0x{newVal:X2}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    private static unsafe bool HandleGrp1_EdIb(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // Encoding: 83 /digit r/m32, imm8
+        // /0 ADD, /1 OR, /2 ADC, /3 SBB, /4 AND, /5 SUB, /6 XOR, /7 CMP
+        int offs = 1;
+        byte modrm = *(address + offs++);
+        byte mod = (byte)((modrm >> 6) & 3);
+        int grp = (modrm >> 3) & 7;
+        int rm = modrm & 7;
+
+        bool regDirect = (mod == 0b11);
+        ulong memAddr = 0;
+
+        // memory addressing (basic forms, same as your MOV handler)
+        if (!regDirect)
+        {
+            if (mod == 0b00)
+                memAddr = *((&ctx->Rax) + rm);
+            else if (mod == 0b01)
+            {
+                sbyte disp8 = *(sbyte*)(address + offs++);
+                memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+            }
+            else if (mod == 0b10)
+            {
+                int disp32 = *(int*)(address + offs);
+                offs += 4;
+                memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+            }
+        }
+
+        sbyte imm8s = *(sbyte*)(address + offs++);
+        uint imm32 = (uint)(int)imm8s; // sign-extended 8→32
+
+        uint* dst32 = regDirect ? (uint*)((&ctx->Rax) + rm) : (uint*)memAddr;
+        uint lhs = *dst32, res = 0;
+
+        const uint CF = 1, PF = 1 << 2, AF = 1 << 4, ZF = 1 << 6, SF = 1 << 7, OF = 1 << 11;
+        uint f = ctx->EFlags;
+
+        void SetLogic(uint r)
+        {
+            f &= ~(CF | OF | ZF | SF | PF);
+            if (r == 0) f |= ZF;
+            if ((r & 0x80000000) != 0) f |= SF;
+            byte lo = (byte)(r & 0xFF);
+            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
+        }
+        void SetAdd(uint a, uint b, int cin, uint r)
+        {
+            f &= ~(CF | OF | ZF | SF | PF | AF);
+            ulong ua = a, ub = (ulong)b + (ulong)cin;
+            if (ua + ub > 0xFFFFFFFF) f |= CF;
+            if ((((a ^ r) & (b ^ r)) & 0x80000000) != 0) f |= OF;
+            if ((((a & 0xF) + (b & 0xF) + (uint)cin) & 0x10) != 0) f |= AF;
+            if (r == 0) f |= ZF;
+            if ((r & 0x80000000) != 0) f |= SF;
+            byte lo = (byte)(r & 0xFF);
+            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
+        }
+        void SetSub(uint a, uint b, int bin, uint r)
+        {
+            f &= ~(CF | OF | ZF | SF | PF | AF);
+            uint ub = b + (uint)bin;
+            if (a < ub) f |= CF;
+            if ((((a ^ b) & (a ^ r)) & 0x80000000) != 0) f |= OF;
+            if ((((~(a ^ b)) & (a ^ r)) & 0x10) != 0) f |= AF;
+            if (r == 0) f |= ZF;
+            if ((r & 0x80000000) != 0) f |= SF;
+            byte lo = (byte)(r & 0xFF);
+            if ((System.Numerics.BitOperations.PopCount(lo) & 1) == 0) f |= PF;
+        }
+
+        string mnem = grp switch { 0 => "ADD", 1 => "OR", 2 => "ADC", 3 => "SBB", 4 => "AND", 5 => "SUB", 6 => "XOR", 7 => "CMP", _ => "???" };
+        string dstName = regDirect ? $"R{rm}d" : $"DWORD PTR [0x{memAddr:X}]";
+
+        switch (grp)
+        {
+            case 0: res = lhs + imm32; SetAdd(lhs, imm32, 0, res); *dst32 = res; break;
+            case 1: res = lhs | imm32; SetLogic(res); *dst32 = res; break;
+            case 2: { int c = (f & CF) != 0 ? 1 : 0; res = lhs + (uint)(imm32 + c); SetAdd(lhs, imm32, c, res); *dst32 = res; } break;
+            case 3: { int b = (f & CF) != 0 ? 1 : 0; res = lhs - (uint)(imm32 + b); SetSub(lhs, imm32, b, res); *dst32 = res; } break;
+            case 4: res = lhs & imm32; SetLogic(res); *dst32 = res; break;
+            case 5: res = lhs - imm32; SetSub(lhs, imm32, 0, res); *dst32 = res; break;
+            case 6: res = lhs ^ imm32; SetLogic(res); *dst32 = res; break;
+            case 7: res = lhs - imm32; SetSub(lhs, imm32, 0, res); break; // CMP
+            default: Log($"Unsupported 83 /{grp}", offs); return false;
+        }
+
+        ctx->EFlags = f;
+        Log($"{mnem} {dstName}, 0x{imm32:X8}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    private static bool HandleJaShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // 0x77 rel8  — Jump if Above (unsigned), i.e., CF==0 && ZF==0
+        sbyte rel8 = *(sbyte*)(address + 1);
+        bool cf = (ctx->EFlags & 0x01) != 0;
+        bool zf = (ctx->EFlags & 0x40) != 0;
+
+        ulong nextRip = ctx->Rip + 2;
+        ulong target = (ulong)((long)nextRip + rel8);
+        bool taken = !cf && !zf;
+
+        Log($"JA short 0x{target:X} {(taken ? "TAKEN" : "NOT taken")}", 2);
+        ctx->Rip = taken ? target : nextRip;
+        return true;
+    }
+    private static unsafe bool HandleTestRmR(CONTEXT* ctx, byte* address, int operandBitsOverride, Action<string, int> Log)
+    {
+        // Address may point to 0x66 or directly to opcode.
+        bool has66 = (*address == 0x66);
+        byte* p = has66 ? address + 1 : address; // p -> opcode (84/85)
+
+        byte op = *p;            // 0x84 (byte) or 0x85 (word/dword/qword)
+        byte modrm = *(p + 1);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        byte reg = (byte)((modrm >> 3) & 0x7);
+        byte rm = (byte)(modrm & 0x7);
+
+        // Check for a REX prefix immediately before 'op' (common in your decoder flow).
+        // If your decoder already captures the active REX byte, pass it in instead.
+        byte rex = 0;
+        if (!has66 && address > (byte*)0) // quick, local peek
+        {
+            byte prev = *(address - 1);
+            if ((prev & 0xF0) == 0x40) rex = prev;
+        }
+        else if (has66)
+        {
+            // 66 may be followed by REX, then the opcode (rare in compiler output, but valid)
+            byte maybeRex = *(address + 1); // this is actually op; if you want full generality, expand prefix scanner
+                                            // keep as-is for now; your codebase already handles REX in a separate path
+        }
+
+        bool rexW = (rex & 0x08) != 0;
+        bool rexR = (rex & 0x04) != 0;
+        bool rexB = (rex & 0x01) != 0;
+
+        // Extend reg indices with REX
+        int dst = rexR ? (reg | 8) : reg;
+        int src = rexB ? (rm | 8) : rm;
+
+        // Decide operand size
+        int bits;
+        if (op == 0x84) bits = 8;
+        else if (operandBitsOverride == 16) bits = 16;            // 66 85 -> word
+        else if (rexW) bits = 64;                                 // REX.W 85 -> qword
+        else bits = 32;                                           // default in long mode
+
+        // Access regs
+        ulong* R = &ctx->Rax;
+
+        // Fetch operands (simple addressing only)
+        ulong lhs, rhs;
+        string lhsDesc, rhsDesc;
+
+        if (op == 0x84)
+        {
+            // TEST r/m8, r8
+            if (mod == 0b11)
+            {
+                lhs = R[src] & 0xFF;
+                lhsDesc = $"R{src}";
+            }
+            else
+            {
+                ulong addr = R[src];
+                lhs = *(byte*)addr;
+                lhsDesc = $"BYTE PTR [0x{addr:X}]";
+            }
+            rhs = R[dst] & 0xFF;
+            rhsDesc = $"R{dst}";
+        }
+        else // 0x85
+        {
+            if (mod == 0b11)
+            {
+                ulong s = R[src];
+                lhs = bits == 16 ? (s & 0xFFFFUL)
+                     : bits == 32 ? (s & 0xFFFF_FFFFUL)
+                     : s;
+                lhsDesc = $"R{src}";
+            }
+            else
+            {
+                ulong addr = R[src];
+                if (bits == 16) lhs = *(ushort*)addr;
+                else if (bits == 32) lhs = *(uint*)addr;
+                else lhs = *(ulong*)addr;
+                lhsDesc = bits == 16 ? $"WORD PTR [0x{addr:X}]"
+                        : bits == 32 ? $"DWORD PTR [0x{addr:X}]"
+                                      : $"QWORD PTR [0x{addr:X}]";
+            }
+
+            ulong d = R[dst];
+            rhs = bits == 16 ? (d & 0xFFFFUL)
+                 : bits == 32 ? (d & 0xFFFF_FFFFUL)
+                              : d;
+            rhsDesc = $"R{dst}";
+        }
+
+        ulong result = lhs & rhs;
+
+        // ----- EFLAGS update for TEST -----
+        const uint CF = 1U << 0;
+        const uint PF = 1U << 2;
+        const uint AF = 1U << 4; // undefined, leave as-is
+        const uint ZF = 1U << 6;
+        const uint SF = 1U << 7;
+        const uint OF = 1U << 11;
+
+        // Clear CF, OF, ZF, SF, PF; preserve AF
+        uint keep = ctx->EFlags & AF;
+        ctx->EFlags = keep;
+        // CF, OF are 0 by definition for TEST
+
+        // ZF
+        if (result == 0) ctx->EFlags |= ZF;
+
+        // SF (sign bit of the chosen width)
+        int msb = bits - 1;
+        if (((result >> msb) & 1UL) != 0) ctx->EFlags |= SF;
+
+        // PF (parity of low byte, even parity -> PF=1)
+        byte low = (byte)(result & 0xFF);
+        // 0x6996 parity trick: bit=1 for even parity
+        if (((0x6996 >> (low & 0x0F)) & 1) == 1)
+        {
+            // fold high nibble
+            byte folded = (byte)(low ^ (low >> 4));
+            if (((0x6996 >> (folded & 0x0F)) & 1) == 1) ctx->EFlags |= PF;
+        }
+
+        // ----- Advance RIP & log -----
+        int len = has66 ? 3 : 2; // 66 + 85 + modrm  OR  85 + modrm
+                                 // (No SIB/disp yet; extend len when you add them)
+
+        string sizeTag = bits == 8 ? "BYTE"
+                         : bits == 16 ? "WORD"
+                         : bits == 32 ? "DWORD"
+                         : "QWORD";
+
+        Log($"TEST {sizeTag} {lhsDesc}, {rhsDesc} => ZF={((ctx->EFlags & ZF) != 0 ? 1 : 0)}, SF={((ctx->EFlags & SF) != 0 ? 1 : 0)}, PF={((ctx->EFlags & PF) != 0 ? 1 : 0)}", len);
+        ctx->Rip += (ulong)len;
+        return true;
+    }
+
+    // MOVZX r32/64, r/m16 : 0F B7 /r
+    private static unsafe bool HandleMovzxGvEw(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        // 0F B7 /r → MOVZX r32/64, r/m16
+        int offs = 2;
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        int reg = (modrm >> 3) & 0x7;
+        int rm = (modrm & 0x7);
+        ulong* R = &ctx->Rax;
+
+        ulong memAddr = 0;
+        ushort val16;
+        string srcDesc;
+
+        if (mod == 0b11)
+        {
+            val16 = (ushort)(R[rm] & 0xFFFF);
+            srcDesc = $"R{rm}w";
+        }
+        else
+        {
+            if (mod == 0b00 && rm == 0b101)
+            {
+                // RIP-relative disp32
+                int disp32 = *(int*)(ip + offs); offs += 4;
+                ulong nextRip = ctx->Rip + (ulong)offs;
+                memAddr = nextRip + (ulong)(long)disp32;
+            }
+            else
+            {
+                memAddr = R[rm];
+                if (mod == 0b01)
+                {
+                    long d8 = *(sbyte*)(ip + offs); offs += 1;
+                    memAddr += (ulong)d8;
+                }
+                else if (mod == 0b10)
+                {
+                    int d32 = *(int*)(ip + offs); offs += 4;
+                    memAddr += (ulong)(long)d32;
+                }
+            }
+
+            val16 = *(ushort*)memAddr;
+            srcDesc = $"WORD PTR [0x{memAddr:X}]";
+        }
+
+    ((uint*)R)[reg] = val16;
+        Log($"MOVZX E{reg}, {srcDesc} => 0x{val16:X4}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+
+
+
+    // TEST with operand-size override (66 85 /r)
+    // Example here: 66 85 C0  -> TEST AX, AX
+    private static unsafe bool HandleTestEwGw(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        if (ip[0] != 0x66 || ip[1] != 0x85) return false;
+
+        byte modrm = ip[2];
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        int reg = (modrm >> 3) & 0x7;
+        int rm = modrm & 0x7;
+        int len = 3;
+
+        ushort lhs, rhs;
+
+        // We only need the AX/word forms used here, but implement the general /r form:
+        if (mod == 0b11)
+        {
+            lhs = (ushort)((&ctx->Rax)[rm] & 0xFFFF);
+            rhs = (ushort)((&ctx->Rax)[reg] & 0xFFFF);
+            Log($"TEST R{rm}w, R{reg}w", len);
+        }
+        else
+        {
+            ulong addr = ((&ctx->Rax)[rm]);
+            lhs = *(ushort*)addr;
+            rhs = (ushort)((&ctx->Rax)[reg] & 0xFFFF);
+            Log($"TEST WORD PTR [0x{addr:X}], R{reg}w", len);
+        }
+
+        uint res = (uint)(lhs & rhs);
+
+        // Update flags: ZF, SF, PF; clear CF/OF for TEST
+        // (assuming you store flags in EFlags like Windows CONTEXT does)
+        const uint CF = 1 << 0, PF = 1 << 2, ZF = 1 << 6, SF = 1 << 7, OF = 1 << 11;
+        uint f = ctx->EFlags;
+        f &= ~(CF | OF | ZF | SF | PF);
+
+        if ((res & 0xFFFF) == 0) f |= ZF;
+        if (((res >> 15) & 1) != 0) f |= SF;
+
+        // Simple parity of low byte:
+        byte low = (byte)(res & 0xFF);
+        bool parity = (System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0;
+        if (parity) f |= PF;
+
+        ctx->EFlags = f;
+        ctx->Rip += (ulong)len;
+        return true;
+    }
+    // Add this handler method anywhere in the X64Emulator class (e.g., near other branch handlers)
+    private static bool HandleJeShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        sbyte rel8 = *(sbyte*)(address + 1);
+        bool zf = (ctx->EFlags & 0x40) != 0;
+        ulong target = (ulong)((long)ctx->Rip + 2 + rel8);
+        Log($"JE short 0x{target:X} {(zf ? "TAKEN" : "NOT taken")}", 2);
+        ctx->Rip = zf ? target : ctx->Rip + 2;
+        return true;
+    }
+
+    private static bool HandleXorRvEv(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        byte modrm = *(address + 1);
+        byte mod = (byte)((modrm >> 6) & 3);
+        byte reg = (byte)((modrm >> 3) & 7);
+        byte rm = (byte)(modrm & 7);
+        ulong value;
+
+        if (mod == 0b11)
+        {
+            // Register to register
+            ulong src = ((&ctx->Rax)[rm]);
+            ulong dst = ((&ctx->Rax)[reg]);
+            value = dst ^ src;
+            ((&ctx->Rax)[reg]) = value;
+            Log($"XOR R{reg}, R{rm}", 2);
+        }
+        else
+        {
+            // Memory form (simplified)
+            ulong addr = ((&ctx->Rax)[rm]);
+            uint src = *(uint*)addr;
+            uint dst = (uint)((&ctx->Rax)[reg]);
+            ((&ctx->Rax)[reg]) = dst ^ src;
+            Log($"XOR R{reg}, [0x{addr:X}]", 2);
+        }
+
+        ctx->Rip += 2;
+        return true;
+    }
+
+    private static bool HandleJneNear(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // 0F 85 rel32  (length = 6)
+        int rel32 = *(int*)(address + 2);
+        ulong nextRip = ctx->Rip + 6;
+        bool zf = (ctx->EFlags & 0x40) != 0;
+        ulong target = nextRip + (ulong)(long)rel32;
+        bool taken = !zf;
+
+        Log($"JNE near 0x{target:X} {(taken ? "TAKEN" : "NOT taken")}", 6);
+        ctx->Rip = taken ? target : nextRip;
+        return true;
+    }
+
+    private static bool HandleJeNear(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // 0F 84 rel32  (length = 6)
+        int rel32 = *(int*)(address + 2);
+        ulong nextRip = ctx->Rip + 6;
+        bool zf = (ctx->EFlags & 0x40) != 0;
+        ulong target = nextRip + (ulong)(long)rel32;
+        bool taken = zf;
+
+        Log($"JE near 0x{target:X} {(taken ? "TAKEN" : "NOT taken")}", 6);
+        ctx->Rip = taken ? target : nextRip;
+        return true;
+    }
+
+    private static bool HandleTestRm32R32(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        int offs = 1;
+        byte modrm = *(address + offs++);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        int reg = (modrm >> 3) & 0x7;
+        int rm = (modrm & 0x7);
+
+        uint src = ((uint*)(&ctx->Rax))[reg];
+        uint val;
+
+        if (mod == 0b11)
+        {
+            val = ((uint*)(&ctx->Rax))[rm];
+        }
+        else
+        {
+            ulong memAddr = *((&ctx->Rax) + rm);
+            if (mod == 0b01) { long d8 = *(sbyte*)(address + offs++); memAddr += (ulong)d8; }
+            else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)d32; }
+            val = *(uint*)memAddr;
+        }
+
+        uint res = val & src;
+        bool zf = (res == 0);
+        bool sf = ((res & 0x80000000u) != 0);
+        ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+
+        Log($"TEST {((mod == 0b11) ? $"R{rm}d" : "r/m32")}, R{reg}d => ZF={(zf ? 1 : 0)} SF={(sf ? 1 : 0)}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    private static bool HandleOperandSizePrefix(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // 0x66 prefix
+        byte op = *(address + 1);
+        if (op == 0x83) // Group-1 Ew,Ib  (ADD/OR/ADC/SBB/AND/SUB/XOR/CMP — imm8 sign-extended to 16)
+        {
+            return HandleGrp1_EwIb(ctx, address, Log);
+        }
+        // Support the pattern we hit: 66 C7 /0 r/m16, imm16
+        if (op == 0xC7) // MOV r/m16, imm16 (because of 0x66 prefix)
+        {
+            int offs = 2; // at ModRM
+            byte modrm = *(address + offs++);
+            byte mod = (byte)((modrm >> 6) & 0x3);
+            int regop = (modrm >> 3) & 0x7;   // must be /0
+            int rm = (modrm & 0x7);
+
+            if (regop != 0)
+            {
+                Log($"Unsupported 66 C7 /{regop}", offs);
+                return false;
+            }
+
+            // SIB helper (no REX here; it’s a legacy prefix)
+            ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
+            {
+                byte scaleBits = (byte)((sib >> 6) & 0x3);
+                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte baseBits = (byte)(sib & 0x7);
+
+                ulong baseVal;
+                if (modLocal == 0b00 && baseBits == 0b101)
+                {
+                    int disp32 = *(int*)(address + offsLocal); offsLocal += 4;
+                    baseVal = (ulong)(long)disp32;  // no base, disp32 only
+                }
+                else
+                {
+                    baseVal = *((&ctx->Rax) + baseBits);
+                }
+
+                ulong indexVal = 0;
+                if (idxBits != 0b100) // 0b100 = no index
+                {
+                    indexVal = *((&ctx->Rax) + idxBits);
+                    indexVal <<= scaleBits; // scale = 1<<scaleBits
+                }
+                return baseVal + indexVal;
+            }
+
+            if (mod == 0b11)
+            {
+                // register form: write low 16 bits of the target reg
+                ushort imm16 = *(ushort*)(address + offs); offs += 2;
+                // low 16 of (&Rax)[rm]
+                ushort* dst16 = (ushort*)((&ctx->Rax) + rm);
+                *dst16 = imm16;
+
+                Log($"MOV R{rm}w, 0x{imm16:X4}", offs);
+                ctx->Rip += (ulong)offs;
+                return true;
+            }
+            else
+            {
+                // memory form
+                ulong memAddr = 0;
+
+                if (mod == 0b00)
+                {
+                    if ((modrm & 0x7) == 0b100)       // SIB
+                    {
+                        byte sib = *(address + offs++);
+                        memAddr = computeSibAddr(sib, mod, ref offs);
+                    }
+                    else if ((modrm & 0x7) == 0b101)  // RIP-rel disp32 (rare under 0x66, but support)
+                    {
+                        int disp32 = *(int*)(address + offs); offs += 4;
+                        ulong nextRip = ctx->Rip + (ulong)offs;
+                        memAddr = nextRip + (ulong)(long)disp32;
+                    }
+                    else
+                    {
+                        memAddr = *((&ctx->Rax) + rm);
+                    }
+                }
+                else if (mod == 0b01) // disp8
+                {
+                    if ((modrm & 0x7) == 0b100)
+                    {
+                        byte sib = *(address + offs++);
+                        long disp8 = *(sbyte*)(address + offs++);  // sign-extend
+                        memAddr = computeSibAddr(sib, mod, ref offs) + (ulong)disp8;
+                    }
+                    else
+                    {
+                        long disp8 = *(sbyte*)(address + offs++);  // sign-extend
+                        memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+                    }
+                }
+                else // mod == 0b10  disp32
+                {
+                    if ((modrm & 0x7) == 0b100)
+                    {
+                        byte sib = *(address + offs++);
+                        int disp32 = *(int*)(address + offs); offs += 4;
+                        memAddr = computeSibAddr(sib, mod, ref offs) + (ulong)(long)disp32;
+                    }
+                    else
+                    {
+                        int disp32 = *(int*)(address + offs); offs += 4;
+                        memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+                    }
+                }
+
+                ushort imm16 = *(ushort*)(address + offs); offs += 2;
+                *(ushort*)memAddr = imm16;
+
+                Log($"MOV WORD PTR [0x{memAddr:X}], 0x{imm16:X4}", offs);
+                ctx->Rip += (ulong)offs;
+                return true;
+            }
+        }
+        if (op == 0x83) // Group-1, Ew,Ib (imm8 sign-extended to 16)
+        {
+            return HandleGrp1_EwIb(ctx, address, Log);
+        }
+        if (op == 0x89) // MOV r/m16, r16
+        {
+            return HandleMovEwGw(ctx, address, Log);
+        }
+        if (op == 0x3B) return HandleCmpGvEv16(ctx, address, Log);
+        if (op == 0x85) // TEST r/m16, r16 (because of 0x66)
+            return HandleTestRmR(ctx, address, operandBitsOverride: 16, Log);
+        if (op == 0x39) // CMP r/m16, r16
+            return HandleCmpEvGv16(ctx, address, Log);
+        Log($"Unhandled 0x66-prefixed opcode 0x{*(address + 1):X2}", 2);
+        return false;
+    }
+    private static unsafe bool HandleCmpGvEv16(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        // 66 3B /r → CMP r16, r/m16
+        int offs = 2;
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = (modrm >> 3) & 7; // destination (r16)
+        int rm = (modrm & 7);      // source (r/m16)
+        ulong* R = &ctx->Rax;
+
+        ushort src, dst;
+        ulong memAddr = 0;
+        string srcDesc, dstDesc;
+
+        if (mod == 0b11)
+        {
+            src = (ushort)(R[rm] & 0xFFFF);
+            srcDesc = $"R{rm}w";
+        }
+        else
+        {
+            memAddr = R[rm];
+            if (mod == 0b01)
+            {
+                long d8 = *(sbyte*)(ip + offs); offs += 1;
+                memAddr += (ulong)d8;
+            }
+            else if (mod == 0b10)
+            {
+                int d32 = *(int*)(ip + offs); offs += 4;
+                memAddr += (ulong)(long)d32;
+            }
+
+            src = *(ushort*)memAddr;
+            srcDesc = $"WORD PTR [0x{memAddr:X}]";
+        }
+
+        dst = (ushort)(R[reg] & 0xFFFF);
+        dstDesc = $"R{reg}w";
+
+        ushort result = (ushort)(dst - src);
+
+        // ---- update flags (Intel rules) ----
+        const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
+        uint f = ctx->EFlags & ~((uint)(CF | PF | AF | ZF | SF | OF));
+
+        if (dst < src) f |= CF;                               // borrow
+        if (result == 0) f |= ZF;
+        if ((result & 0x8000) != 0) f |= SF;
+        if ((((dst ^ src) & (dst ^ result)) & 0x8000) != 0) f |= OF;
+        // parity flag
+        byte low = (byte)(result & 0xFF);
+        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0)
+            f |= PF;
+
+        ctx->EFlags = f;
+
+        Log($"CMP {dstDesc}, {srcDesc} => result=0x{result:X4} ZF={((f & ZF) != 0 ? 1 : 0)} SF={((f & SF) != 0 ? 1 : 0)} CF={((f & CF) != 0 ? 1 : 0)}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    private static unsafe bool HandleMovEwGw(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // 66 89 /r → MOV r/m16, r16
+        int offs = 2;
+        byte modrm = *(address + offs++);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        int reg = (modrm >> 3) & 0x7; // source
+        int rm = (modrm & 0x7);      // destination
+        ulong* R = &ctx->Rax;
+
+        ushort srcVal = (ushort)(R[reg] & 0xFFFF);
+        ulong memAddr = 0;
+        string dstDesc;
+
+        if (mod == 0b11)
+        {
+            // Register to register: overwrite low 16 bits only
+            R[rm] = (R[rm] & ~0xFFFFUL) | srcVal;
+            dstDesc = $"R{rm}w";
+        }
+        else
+        {
+            // Compute effective address (simple + disp)
+            memAddr = R[rm];
+            if (mod == 0b01) // disp8
+            {
+                long disp8 = *(sbyte*)(address + offs++);
+                memAddr += (ulong)disp8;
+            }
+            else if (mod == 0b10) // disp32
+            {
+                int disp32 = *(int*)(address + offs);
+                offs += 4;
+                memAddr += (ulong)(long)disp32;
+            }
+
+            *(ushort*)memAddr = srcVal;
+            dstDesc = $"WORD PTR [0x{memAddr:X}]";
+        }
+
+        Log($"MOV {dstDesc}, R{reg}w => 0x{srcVal:X4}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+
+    private static unsafe bool HandleGrp1_EwIb(X64Emulator.CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // Encoding: 66 83 /r ib   ; /0 ADD, /1 OR, /2 ADC, /3 SBB, /4 AND, /5 SUB, /6 XOR, /7 CMP
+        int offs = 2;                  // start at ModRM
+        byte modrm = *(address + offs++);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        int grp = (modrm >> 3) & 0x7; // /digit
+        int rm = (modrm & 0x7);
+
+        // Addressing (reg or simple [reg]/[reg+disp])
+        bool regDirect = (mod == 0b11);
+        ulong memAddr = 0;
+
+        if (!regDirect)
+        {
+            if (mod == 0b00)
+            {
+                if (rm == 0b100) { byte sib = *(address + offs++); memAddr = ComputeSibAddr16(ctx, address, sib, mod, ref offs); }
+                else if (rm == 0b101) { int disp32 = *(int*)(address + offs); offs += 4; memAddr = (ulong)(long)disp32; }
+                else memAddr = *((&ctx->Rax) + rm);
+            }
+            else if (mod == 0b01)
+            {
+                if (rm == 0b100) { byte sib = *(address + offs++); memAddr = ComputeSibAddr16(ctx, address, sib, mod, ref offs); }
+                else { long d8 = *(sbyte*)(address + offs++); memAddr = *((&ctx->Rax) + rm) + (ulong)d8; }
+            }
+            else // 0b10
+            {
+                if (rm == 0b100) { byte sib = *(address + offs++); int d32 = *(int*)(address + offs); offs += 4; memAddr = ComputeSibAddr16(ctx, address, sib, mod, ref offs) + (ulong)(long)d32; }
+                else { int d32 = *(int*)(address + offs); offs += 4; memAddr = *((&ctx->Rax) + rm) + (ulong)(long)d32; }
+            }
+        }
+
+        // imm8 sign-extended to 16
+        sbyte imm8s = *(sbyte*)(address + offs++);
+        ushort imm16 = (ushort)(short)imm8s;
+
+        // Load/store target
+        ushort* dst16 = regDirect ? (ushort*)((&ctx->Rax) + rm) : (ushort*)memAddr;
+        ushort lhs = *dst16, res = 0;
+
+        // Flags
+        const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
+        uint f = ctx->EFlags;
+
+        void SetLogic(ushort r)
+        {
+            f &= ~(CF | OF | ZF | SF | PF);                 // CF=OF=0; update ZF/SF/PF
+            if (r == 0) f |= ZF;
+            if ((r & 0x8000) != 0) f |= SF;
+            byte lo = (byte)(r & 0xFF);
+            if ((System.Numerics.BitOperations.PopCount((uint)lo) & 1) == 0) f |= PF;
+        }
+        void SetAdd(ushort a, ushort b, int cin, ushort r)
+        {
+            f &= ~(CF | OF | ZF | SF | PF | AF);
+            uint ua = a, ub = (uint)(b + cin);
+            if (ua + ub > 0xFFFF) f |= CF;
+            if ((((a ^ r) & (b ^ r)) & 0x8000) != 0) f |= OF;
+            if ((((a & 0xF) + (b & 0xF) + (uint)cin) & 0x10) != 0) f |= AF;
+            if (r == 0) f |= ZF;
+            if ((r & 0x8000) != 0) f |= SF;
+            byte lo = (byte)(r & 0xFF);
+            if ((System.Numerics.BitOperations.PopCount((uint)lo) & 1) == 0) f |= PF;
+        }
+        void SetSub(ushort a, ushort b, int bin, ushort r)
+        {
+            f &= ~(CF | OF | ZF | SF | PF | AF);
+            uint ub = (uint)(b + bin);
+            if ((uint)a < ub) f |= CF;                              // borrow -> CF=1
+            if ((((a ^ b) & (a ^ r)) & 0x8000) != 0) f |= OF;
+            if ((((~(a ^ b)) & (a ^ r)) & 0x10) != 0) f |= AF;    // Intel AF formula
+            if (r == 0) f |= ZF;
+            if ((r & 0x8000) != 0) f |= SF;
+            byte lo = (byte)(r & 0xFF);
+            if ((System.Numerics.BitOperations.PopCount((uint)lo) & 1) == 0) f |= PF;
+        }
+
+        string mnem = grp switch { 0 => "ADD", 1 => "OR", 2 => "ADC", 3 => "SBB", 4 => "AND", 5 => "SUB", 6 => "XOR", 7 => "CMP", _ => "???" };
+        string dstTxt = regDirect ? $"R{rm}w" : $"WORD PTR [0x{memAddr:X}]";
+
+        switch (grp)
+        {
+            case 0: res = (ushort)(lhs + imm16); SetAdd(lhs, imm16, 0, res); *dst16 = res; break;
+            case 1: res = (ushort)(lhs | imm16); SetLogic(res); *dst16 = res; break;
+            case 2: { int c = (f & CF) != 0 ? 1 : 0; res = (ushort)(lhs + (ushort)(imm16 + c)); SetAdd(lhs, imm16, c, res); *dst16 = res; } break;
+            case 3: { int b = (f & CF) != 0 ? 1 : 0; res = (ushort)(lhs - (ushort)(imm16 + b)); SetSub(lhs, imm16, b, res); *dst16 = res; } break;
+            case 4: res = (ushort)(lhs & imm16); SetLogic(res); *dst16 = res; break;
+            case 5: res = (ushort)(lhs - imm16); SetSub(lhs, imm16, 0, res); *dst16 = res; break;
+            case 6: res = (ushort)(lhs ^ imm16); SetLogic(res); *dst16 = res; break;
+            case 7: res = (ushort)(lhs - imm16); SetSub(lhs, imm16, 0, res); /* no write-back */ break;
+            default: Log($"Unsupported 66 83 /{grp}", offs); return false;
+        }
+
+        ctx->EFlags = f;
+        Log($"{mnem} {dstTxt}, 0x{imm16:X4}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+
+        // local SIB helper (16-bit op, but addressing is standard 64-bit)
+        static ulong ComputeSibAddr16(CONTEXT* ctx, byte* baseAddr, byte sib, byte modLocal, ref int offsLocal)
+        {
+            byte scaleBits = (byte)((sib >> 6) & 0x3);
+            byte idxBits = (byte)((sib >> 3) & 0x7);
+            byte baseBits = (byte)(sib & 0x7);
+
+            ulong baseVal = 0;
+            if (!(modLocal == 0b00 && baseBits == 0b101))
+                baseVal = *((&ctx->Rax) + baseBits);
+
+            ulong indexVal = 0;
+            if (idxBits != 0b100)
+            {
+                indexVal = *((&ctx->Rax) + idxBits);
+                indexVal <<= scaleBits;
+            }
+
+            ulong addr = baseVal + indexVal;
+            if (modLocal == 0b01) { long d8 = *(sbyte*)(baseAddr + offsLocal); offsLocal += 1; addr += (ulong)d8; }
+            else if (modLocal == 0b10) { int d32 = *(int*)(baseAddr + offsLocal); offsLocal += 4; addr += (ulong)(long)d32; }
+            return addr;
+        }
+    }
+
+
     private static  bool HandleMovRm8Imm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         byte modrm = *(address + 1);
@@ -255,35 +1297,7 @@ public static unsafe class X64Emulator
             };
         }
     }
-    private static bool HandleRexBGroup(CONTEXT* ctx, byte* address, Action<string, int> Log)
-    {
-        byte op2 = *(address + 1);
-        // PUSH R8–R15 (41 50–57)
-        if (op2 >= 0x50 && op2 <= 0x57)
-        {
-            int reg = op2 - 0x50; // 0..7 → R8..R15
-            ulong* regPtr = (&ctx->R8) + reg;
-            Log($"PUSH R{8 + reg}", 2);
-            ctx->Rsp -= 8;
-            *(ulong*)ctx->Rsp = *regPtr;
-            ctx->Rip += 2;
-            return true;
-        }
-        // POP R8–R15 (41 58–5F)
-        if (op2 >= 0x58 && op2 <= 0x5F)
-        {
-            int reg = op2 - 0x58; // 0..7 → R8..R15
-            ulong* regPtr = (&ctx->R8) + reg;
-            ulong v = *(ulong*)ctx->Rsp;
-            ctx->Rsp += 8;
-            *regPtr = v;
-            Log($"POP R{8 + reg}", 2);
-            ctx->Rip += 2;
-            return true;
-        }
-        Log($"Unsupported 41 0x{op2:X2}", 2);
-        return false;
-    }
+
     private static bool HandleMovImmToReg_NoRex(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         byte opcode = *address;                 // B8..BF
@@ -311,16 +1325,7 @@ public static unsafe class X64Emulator
         if (before.EFlags != after.EFlags) sb.Append($" EFlags:0x{before.EFlags:X}->0x{after.EFlags:X}");
         return sb.ToString();
     }
-    // Add this handler method anywhere in the X64Emulator class (e.g., near other branch handlers)
-    private static bool HandleJeShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
-    {
-        sbyte rel8 = *(sbyte*)(address + 1);
-        bool zf = (ctx->EFlags & 0x40) != 0;
-        ulong target = (ulong)((long)ctx->Rip + 2 + rel8);
-        Log($"JE short 0x{target:X} {(zf ? "TAKEN" : "NOT taken")}", 2);
-        ctx->Rip = zf ? target : ctx->Rip + 2;
-        return true;
-    }
+   
     private static bool HandleMovR32Rm32(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         // MOV r32, r/m32  =>  8B /r
@@ -400,37 +1405,60 @@ public static unsafe class X64Emulator
     private static bool HandleJmpShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         sbyte rel8 = *(sbyte*)(address + 1);
-        ulong target = (ulong)((long)ctx->Rip + 2 + rel8);
-        Log($"JMP short 0x{target:X}", 2);
-        ctx->Rip = target;
+        ulong nextRip = ctx->Rip + 2;
+        long target = (long)nextRip + rel8;
+
+        Log($"JMP short {rel8:+#;-#;0} -> 0x{(ulong)target:X}", 2);
+
+        ctx->Rip = (ulong)target;
         return true;
     }
 
-    private static bool HandleMovzxR32Rm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
+
+    private static unsafe bool HandleMovzxR32Rm8(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
-        byte modrm = *(address + 2);
+        // ip[0]=0F, ip[1]=B6
+        int offs = 2;
+        byte modrm = ip[offs++];
         byte mod = (byte)((modrm >> 6) & 0x3);
-        byte reg = (byte)((modrm >> 3) & 0x7);
-        byte rm = (byte)(modrm & 0x7);
-        int instrLen = 3;
-        byte value;
+        int reg = (modrm >> 3) & 0x7; // dest (Ereg)
+        int rm = (modrm & 0x7);      // src
+        ulong* R = &ctx->Rax;
+
+        byte value8;
+        string srcDesc;
+        ulong memAddr = 0;
+
         if (mod == 0b11)
         {
-            // Register to register
-            value = (byte)((((&ctx->Rax)[rm]) & 0xFF));
+            value8 = (byte)(R[rm] & 0xFF);
+            srcDesc = $"R{rm}b";
         }
         else
         {
-            // Only simple [register] addressing for now
-            ulong addr = ((&ctx->Rax)[rm]);
-            value = *(byte*)addr;
+            if (mod == 0b00 && rm == 0b101)
+            {
+                int disp32 = *(int*)(ip + offs); offs += 4;
+                ulong nextRip = ctx->Rip + (ulong)offs;
+                memAddr = nextRip + (ulong)(long)disp32;
+            }
+            else
+            {
+                memAddr = R[rm];
+                if (mod == 0b01) { long d8 = *(sbyte*)(ip + offs); offs += 1; memAddr += (ulong)d8; }
+                else if (mod == 0b10) { int d32 = *(int*)(ip + offs); offs += 4; memAddr += (ulong)(long)d32; }
+            }
+            value8 = *(byte*)memAddr;
+            srcDesc = $"BYTE PTR [0x{memAddr:X}]";
         }
-        // Zero-extend to 32 bits and store in destination register
-        ((uint*)(&ctx->Rax))[reg] = value;
-        Log($"MOVZX R{reg}, r/m8 => R{reg}=0x{value:X2}", instrLen);
-        ctx->Rip += (ulong)instrLen;
+
+        ((uint*)R)[reg] = value8; // zero-extend via Ereg write
+
+        Log($"MOVZX E{reg}, {srcDesc} => 0x{value8:X2}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
+
 
     private static bool HandleCmpAlImm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
@@ -707,26 +1735,39 @@ public static unsafe class X64Emulator
     }
     private static bool HandleSegmentPrefix(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
-        if (*address != 0x65) return false; // only GS prefix
+        byte prefix = *address; // 0x65 (GS)
+        if (prefix != 0x65)
+            return false;
 
         byte* next = address + 1;
 
-        // Example: 65 48 8B 04 25 XX XX XX XX  => MOV RAX, [GS:disp32]
-        if (*next == 0x48 && *(next + 1) == 0x8B && *(next + 2) == 0x04 && *(next + 3) == 0x25)
+        // 65 48 8B 00  => MOV RAX, [GS:RAX]
+        // General pattern: 65 48 8B /r (modrm with mod==00)
+        if (*next == 0x48 && *(next + 1) == 0x8B)
         {
-            uint disp32 = *(uint*)(next + 4);
-            ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
-            ulong addr = tebBase + disp32;
-            ulong value = *(ulong*)addr;
-            ctx->Rax = value;
-            Log($"MOV RAX, [GS:0x{disp32:X}] => RAX=0x{value:X} (TEB base=0x{tebBase:X})", 9);
-            ctx->Rip += 9;
-            return true;
+            byte modrm = *(next + 2);
+            byte mod = (byte)((modrm >> 6) & 3);
+            byte reg = (byte)((modrm >> 3) & 7);
+            byte rm = (byte)(modrm & 7);
+
+            if (mod == 0) // no displacement
+            {
+                ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
+                ulong addr = tebBase + ((&ctx->Rax)[rm]);
+                ulong value = *(ulong*)addr;
+                ((&ctx->Rax)[reg]) = value;
+
+                Log($"MOV R{reg}, [GS:R{rm}] => R{reg}=0x{value:X} (addr=0x{addr:X}, GS=0x{tebBase:X})", 4);
+                ctx->Rip += 4;
+                return true;
+            }
         }
 
-        Log("Unhandled GS-prefixed opcode", 2);
+
+        Log("Unhandled GS-prefixed opcode", 8);
         return false;
     }
-    
+
+
 }
 

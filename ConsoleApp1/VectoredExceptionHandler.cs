@@ -43,11 +43,10 @@ public static unsafe class VectoredExceptionHandler
     {
         // Access ExceptionRecord->ExceptionCode
         uint code = *((uint*)exceptionInfo.ExceptionRecord);
-
+        var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
+        ulong rip = ctx->Rip;
         if (code == EXCEPTION_SINGLE_STEP)
         {
-            var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
-            ulong rip = ctx->Rip;
             if (rip >= (ulong)g_codeAddress && rip < (ulong)g_codeAddress + (ulong)g_codeSize)
             {
                 g_instructionCount++;
@@ -61,11 +60,10 @@ public static unsafe class VectoredExceptionHandler
                 if (ctx->Rip >= (ulong)g_codeAddress && ctx->Rip < (ulong)g_codeAddress + (ulong)g_codeSize)
                 {
                     SetHWBP(ref exceptionInfo, (void*)ctx->Rip);
-
                 }
                 else
                 {
-                    ClearHWBP(ref exceptionInfo);
+                    SetHWBP(ref exceptionInfo, (void*)*(ulong*)ctx->Rsp);
                 }
 
                 return EXCEPTION_CONTINUE_EXECUTION;
@@ -73,11 +71,13 @@ public static unsafe class VectoredExceptionHandler
             else
             {
                 Console.WriteLine($"[VEH] RIP 0x{rip:X} outside target code range, continuing search.");
-                return EXCEPTION_CONTINUE_SEARCH;
+                return EXCEPTION_CONTINUE_EXECUTION;
             }
         }
-
-        Console.WriteLine($"[VEH] Exception code 0x{code:X} not handled, continuing search.");
+        else
+        {
+            Console.WriteLine($"[VEH] Received exception code RIP 0x{rip:X} 0x{code:X}, not handled, continuing search.");
+        }
 
         return EXCEPTION_CONTINUE_SEARCH;
     }
