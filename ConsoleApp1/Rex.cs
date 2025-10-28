@@ -1,9 +1,10 @@
-﻿using ConsoleApp1;
-using static ConsoleApp1.X64Emulator;
+﻿using static ConsoleApp1.X64Emulator;
+
+namespace ConsoleApp1;
 
 internal static class Rex
 {
-    public static unsafe bool Handle(X64Emulator.CONTEXT* ctx, byte* address, Action<string, int> Log)
+    public static unsafe bool Handle(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         // REX bits
         byte rex = *address;                 // 0x4X
@@ -18,7 +19,7 @@ internal static class Rex
         if (op2 >= 0x50 && op2 <= 0x57)
         {
             int reg = op2 - 0x50; // 0..7 → R8..R15
-            ulong* regPtr = (&ctx->R8) + reg;
+            ulong* regPtr = &ctx->R8 + reg;
             Log($"PUSH R{8 + reg}", 2);
             ctx->Rsp -= 8;
             *(ulong*)ctx->Rsp = *regPtr;
@@ -29,7 +30,7 @@ internal static class Rex
         if (op2 >= 0x58 && op2 <= 0x5F)
         {
             int reg = op2 - 0x58; // 0..7 → R8..R15
-            ulong* regPtr = (&ctx->R8) + reg;
+            ulong* regPtr = &ctx->R8 + reg;
             ulong v = *(ulong*)ctx->Rsp;
             ctx->Rsp += 8;
             *regPtr = v;
@@ -66,19 +67,19 @@ internal static class Rex
 
             int offs = 2; // ModRM
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int grp = (modrm >> 3) & 0x7;     // /0 .. /7
-            int rm = (modrm & 0x7) | (B ? 8 : 0);
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int grp = modrm >> 3 & 0x7;     // /0 .. /7
+            int rm = modrm & 0x7 | (B ? 8 : 0);
 
             // SIB/RIP-rel helper (same style as your other handlers)
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                if (idxBits != 0b100) indexReg |= X ? 8 : 0;
                 int baseReg = baseBits | (B ? 8 : 0);
 
                 ulong baseVal;
@@ -90,13 +91,13 @@ internal static class Rex
                 }
                 else
                 {
-                    baseVal = *((&ctx->Rax) + baseReg);
+                    baseVal = *(&ctx->Rax + baseReg);
                 }
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100) // 0b100 => no index, REX.X ignored
                 {
-                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal = *(&ctx->Rax + indexReg);
                     indexVal <<= scaleBits; // scale = 1<<scaleBits
                 }
                 return baseVal + indexVal;
@@ -105,21 +106,21 @@ internal static class Rex
             // Destination: register or memory
             ulong* dstReg = null;
             ulong memAddr = 0;
-            bool isReg = (mod == 0b11);
+            bool isReg = mod == 0b11;
             if (isReg)
             {
-                dstReg = (&ctx->Rax) + rm;
+                dstReg = &ctx->Rax + rm;
             }
             else
             {
-                if ((mod == 0b00) && ((modrm & 0x7) == 0b101))
+                if (mod == 0b00 && (modrm & 0x7) == 0b101)
                 {
                     // RIP-relative disp32
                     int disp32r = *(int*)(address + offs); offs += 4;
                     ulong nextRip = ctx->Rip + (ulong)offs;
                     memAddr = nextRip + (ulong)(long)disp32r;
                 }
-                else if (((modrm & 0x7) == 0b100))
+                else if ((modrm & 0x7) == 0b100)
                 {
                     // SIB (with optional disp8/disp32 inside)
                     byte sib = *(address + offs++);
@@ -138,7 +139,7 @@ internal static class Rex
                 else
                 {
                     // [base] [+ disp8/disp32]
-                    memAddr = *((&ctx->Rax) + rm);
+                    memAddr = *(&ctx->Rax + rm);
                     if (mod == 0b01)
                     {
                         long disp8 = *(sbyte*)(address + offs++);
@@ -192,9 +193,9 @@ internal static class Rex
                 ulong res = lhs - uimm;
 
                 // Minimal flags (you’ve been using ZF/SF in branches)
-                bool zf = (res == 0);
-                bool sf = (res & (1UL << 63)) != 0;
-                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+                bool zf = res == 0;
+                bool sf = (res & 1UL << 63) != 0;
+                ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
                 if (isReg)
                     Log($"CMP R{rm}, 0x{(uint)imm32:X8} => (R{rm}=0x{lhs:X})", offs);
@@ -219,9 +220,9 @@ internal static class Rex
 
             int offs = 2;                           // start at ModRM
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int regop = (modrm >> 3) & 0x7;        // must be /0
-            int rm = (modrm & 0x7) | (B ? 8 : 0);
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int regop = modrm >> 3 & 0x7;        // must be /0
+            int rm = modrm & 0x7 | (B ? 8 : 0);
 
             if (regop != 0)
             {
@@ -232,12 +233,12 @@ internal static class Rex
             // helper for SIB
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                if (idxBits != 0b100) indexReg |= X ? 8 : 0;
                 int baseReg = baseBits | (B ? 8 : 0);
 
                 ulong baseVal;
@@ -250,13 +251,13 @@ internal static class Rex
                 }
                 else
                 {
-                    baseVal = *((&ctx->Rax) + baseReg);
+                    baseVal = *(&ctx->Rax + baseReg);
                 }
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100) // 0b100 => no index, REX.X ignored
                 {
-                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal = *(&ctx->Rax + indexReg);
                     indexVal <<= scaleBits; // scale = 1<<scaleBits
                 }
 
@@ -268,7 +269,7 @@ internal static class Rex
             {
                 // register form: MOV r64, imm32 (sign-extended)
                 int imm32 = *(int*)(address + offs); offs += 4;
-                ulong* dst = (&ctx->Rax) + rm;
+                ulong* dst = &ctx->Rax + rm;
                 *dst = (ulong)(long)imm32;
                 Log($"MOV R{rm}, 0x{imm32:X8} (sext) => R{rm}=0x{*dst:X}", offs);
                 ctx->Rip += (ulong)offs;
@@ -294,7 +295,7 @@ internal static class Rex
                     }
                     else
                     {
-                        memAddr = *((&ctx->Rax) + rm);
+                        memAddr = *(&ctx->Rax + rm);
                     }
                 }
                 else if (mod == 0b01)                    // disp8
@@ -308,7 +309,7 @@ internal static class Rex
                     else
                     {
                         long disp8 = *(sbyte*)(address + offs++);
-                        memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+                        memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
                     }
                 }
                 else                                     // mod == 0b10  disp32
@@ -322,7 +323,7 @@ internal static class Rex
                     else
                     {
                         int disp32 = *(int*)(address + offs); offs += 4;
-                        memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+                        memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
                     }
                 }
 
@@ -339,7 +340,7 @@ internal static class Rex
         if (op2 == 0x83 && op3 == 0xE4)      // 48 83 E4 imm8 -> AND RSP, imm8
         {
             byte imm8 = *(address + 3);
-            ctx->Rsp &= 0xFFFFFFFFFFFFFF00UL | (ulong)imm8;
+            ctx->Rsp &= 0xFFFFFFFFFFFFFF00UL | imm8;
             Log($"AND RSP, 0x{imm8:X2} => new RSP=0x{ctx->Rsp:X}", 4);
             ctx->Rip += 4;
             return true;
@@ -376,17 +377,17 @@ internal static class Rex
             // Decode ModRM/SIB/disp and compute effective address or reg
             int offs = 2;                    // start at ModRM
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // source register (with REX.R)
-            int rm = (modrm & 0x7) | (B ? 8 : 0);         // r/m with REX.B
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int reg = modrm >> 3 & 0x7 | (R ? 8 : 0);   // source register (with REX.R)
+            int rm = modrm & 0x7 | (B ? 8 : 0);         // r/m with REX.B
 
             // Source reg pointer
-            ulong* src = (&ctx->Rax) + reg;
+            ulong* src = &ctx->Rax + reg;
 
             if (mod == 0b11)
             {
                 // register to register
-                ulong* dst = (&ctx->Rax) + rm;
+                ulong* dst = &ctx->Rax + rm;
                 *dst = *src;
                 Log($"MOV R{rm}, R{reg} => R{rm}=0x{*dst:X}", offs);
                 ctx->Rip += (ulong)offs;
@@ -399,12 +400,12 @@ internal static class Rex
             // Helper: compute SIB
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                if (idxBits != 0b100) indexReg |= X ? 8 : 0;
 
                 int baseReg = baseBits | (B ? 8 : 0);
 
@@ -418,13 +419,13 @@ internal static class Rex
                 }
                 else
                 {
-                    baseVal = *((&ctx->Rax) + baseReg);
+                    baseVal = *(&ctx->Rax + baseReg);
                 }
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100) // if there IS an index
                 {
-                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal = *(&ctx->Rax + indexReg);
                     indexVal <<= scaleBits; // scale = 1<<scaleBits
                 }
 
@@ -449,7 +450,7 @@ internal static class Rex
                 }
                 else
                 {
-                    memAddr = *((&ctx->Rax) + rm);
+                    memAddr = *(&ctx->Rax + rm);
                 }
             }
             else if (mod == 0b01) // disp8
@@ -463,7 +464,7 @@ internal static class Rex
                 else
                 {
                     long disp8 = *(sbyte*)(address + offs++);
-                    memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+                    memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
                 }
             }
             else // mod == 0b10  disp32
@@ -477,7 +478,7 @@ internal static class Rex
                 else
                 {
                     int disp32 = *(int*)(address + offs); offs += 4;
-                    memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+                    memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
                 }
             }
 
@@ -500,19 +501,19 @@ internal static class Rex
 
             int offs = 2; // at ModRM
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int grp = (modrm >> 3) & 0x7;            // /0..7
-            int rm = (modrm & 0x7) | (B ? 8 : 0);
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int grp = modrm >> 3 & 0x7;            // /0..7
+            int rm = modrm & 0x7 | (B ? 8 : 0);
 
             // Helper: SIB / RIP-rel address computation
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                if (idxBits != 0b100) indexReg |= X ? 8 : 0;
                 int baseReg = baseBits | (B ? 8 : 0);
 
                 ulong baseVal;
@@ -523,25 +524,25 @@ internal static class Rex
                 }
                 else
                 {
-                    baseVal = *((&ctx->Rax) + baseReg);
+                    baseVal = *(&ctx->Rax + baseReg);
                 }
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100) // 0b100 => no index
                 {
-                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal = *(&ctx->Rax + indexReg);
                     indexVal <<= scaleBits; // scale = 1<<scaleBits
                 }
                 return baseVal + indexVal;
             }
 
-            bool isReg = (mod == 0b11);
+            bool isReg = mod == 0b11;
             ulong memAddr = 0;
             ulong* dstReg = null;
 
             if (isReg)
             {
-                dstReg = (&ctx->Rax) + rm;
+                dstReg = &ctx->Rax + rm;
             }
             else
             {
@@ -570,7 +571,7 @@ internal static class Rex
                 else
                 {
                     // [base] [+disp8/disp32]
-                    memAddr = *((&ctx->Rax) + rm);
+                    memAddr = *(&ctx->Rax + rm);
                     if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8; }
                     else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)disp32; }
                 }
@@ -614,9 +615,9 @@ internal static class Rex
                     {
                         ulong lhs = isReg ? *dstReg : *(ulong*)memAddr;
                         ulong res = lhs - uimm;
-                        bool zf = (res == 0);
-                        bool sf = (res & (1UL << 63)) != 0;
-                        ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+                        bool zf = res == 0;
+                        bool sf = (res & 1UL << 63) != 0;
+                        ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
                         if (isReg)
                             Log($"CMP R{rm}, 0x{(byte)simm8:X2} => (R{rm}=0x{lhs:X})", offs);
@@ -643,22 +644,22 @@ internal static class Rex
 
             int offs = 2;                      // start at ModRM
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // destination register
-            int rm = (modrm & 0x7) | (B ? 8 : 0);          // r/m
-            ulong* dst = (&ctx->Rax) + reg;
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int reg = modrm >> 3 & 0x7 | (R ? 8 : 0);   // destination register
+            int rm = modrm & 0x7 | (B ? 8 : 0);          // r/m
+            ulong* dst = &ctx->Rax + reg;
 
             ulong memAddr = 0;
 
             // helper identical to your computeSibAddr()
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                if (idxBits != 0b100) indexReg |= X ? 8 : 0;
                 int baseReg = baseBits | (B ? 8 : 0);
 
                 ulong baseVal;
@@ -667,12 +668,12 @@ internal static class Rex
                     int disp32 = *(int*)(address + offsLocal); offsLocal += 4;
                     baseVal = (ulong)(long)disp32;
                 }
-                else baseVal = *((&ctx->Rax) + baseReg);
+                else baseVal = *(&ctx->Rax + baseReg);
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100)
                 {
-                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal = *(&ctx->Rax + indexReg);
                     indexVal <<= scaleBits;
                 }
                 return baseVal + indexVal;
@@ -692,7 +693,7 @@ internal static class Rex
                     ulong nextRip = ctx->Rip + (ulong)offs;
                     memAddr = nextRip + (ulong)(long)disp32;      // RIP-relative
                 }
-                else memAddr = *((&ctx->Rax) + rm);
+                else memAddr = *(&ctx->Rax + rm);
             }
             else if (mod == 0b01)
             {
@@ -705,7 +706,7 @@ internal static class Rex
                 else
                 {
                     long disp8 = *(sbyte*)(address + offs++);
-                    memAddr = *((&ctx->Rax) + rm) + (ulong)disp8;
+                    memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
                 }
             }
             else
@@ -719,7 +720,7 @@ internal static class Rex
                 else
                 {
                     int disp32 = *(int*)(address + offs); offs += 4;
-                    memAddr = *((&ctx->Rax) + rm) + (ulong)(long)disp32;
+                    memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
                 }
             }
 
@@ -752,19 +753,19 @@ internal static class Rex
 
             int offs = 2; // start at ModRM
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // source r64 (REX.R)
-            int rm = (modrm & 0x7) | (B ? 8 : 0);         // dest   r/m64 (REX.B)
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int reg = modrm >> 3 & 0x7 | (R ? 8 : 0);   // source r64 (REX.R)
+            int rm = modrm & 0x7 | (B ? 8 : 0);         // dest   r/m64 (REX.B)
 
             // Helper for SIB / RIP-relative
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                if (idxBits != 0b100) indexReg |= X ? 8 : 0;
                 int baseReg = baseBits | (B ? 8 : 0);
 
                 ulong baseVal;
@@ -775,32 +776,32 @@ internal static class Rex
                 }
                 else
                 {
-                    baseVal = *((&ctx->Rax) + baseReg);
+                    baseVal = *(&ctx->Rax + baseReg);
                 }
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100)
                 {
-                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal = *(&ctx->Rax + indexReg);
                     indexVal <<= scaleBits; // 1<<scaleBits
                 }
                 return baseVal + indexVal;
             }
 
-            ulong* src = (&ctx->Rax) + reg;
+            ulong* src = &ctx->Rax + reg;
 
             if (mod == 0b11)
             {
                 // register form: SUB r64, r64
-                ulong* dst = (&ctx->Rax) + rm;
+                ulong* dst = &ctx->Rax + rm;
                 ulong old = *dst;
                 ulong nw = old - *src;
                 *dst = nw;
 
                 // Minimal flags used by your branches (ZF/SF)
-                bool zf = (nw == 0);
-                bool sf = (nw & (1UL << 63)) != 0;
-                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+                bool zf = nw == 0;
+                bool sf = (nw & 1UL << 63) != 0;
+                ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
                 Log($"SUB R{rm}, R{reg} => 0x{old:X}-0x{*src:X}=0x{nw:X}", offs);
                 ctx->Rip += (ulong)offs;
@@ -835,7 +836,7 @@ internal static class Rex
                 }
                 else
                 {
-                    memAddr = *((&ctx->Rax) + rm);
+                    memAddr = *(&ctx->Rax + rm);
                     if (mod == 0b01)
                     {
                         long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8;
@@ -850,9 +851,9 @@ internal static class Rex
                 ulong nw = old - *src;
                 *(ulong*)memAddr = nw;
 
-                bool zf = (nw == 0);
-                bool sf = (nw & (1UL << 63)) != 0;
-                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+                bool zf = nw == 0;
+                bool sf = (nw & 1UL << 63) != 0;
+                ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
                 Log($"SUB QWORD PTR [0x{memAddr:X}], R{reg} => 0x{old:X}-0x{*src:X}=0x{nw:X}", offs);
                 ctx->Rip += (ulong)offs;
@@ -871,19 +872,19 @@ internal static class Rex
 
             int offs = 2; // at ModRM
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // destination r64 (REX.R)
-            int rm = (modrm & 0x7) | (B ? 8 : 0);         // base (REX.B)
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int reg = modrm >> 3 & 0x7 | (R ? 8 : 0);   // destination r64 (REX.R)
+            int rm = modrm & 0x7 | (B ? 8 : 0);         // base (REX.B)
 
             // SIB/RIP-rel helper
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);      // REX.X extends index when present
+                if (idxBits != 0b100) indexReg |= X ? 8 : 0;      // REX.X extends index when present
                 int baseReg = baseBits | (B ? 8 : 0);              // REX.B extends base
 
                 ulong baseVal;
@@ -894,13 +895,13 @@ internal static class Rex
                 }
                 else
                 {
-                    baseVal = *((&ctx->Rax) + baseReg);
+                    baseVal = *(&ctx->Rax + baseReg);
                 }
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100) // 0b100 => no index
                 {
-                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal = *(&ctx->Rax + indexReg);
                     indexVal <<= scaleBits; // scale = 1<<scaleBits
                 }
 
@@ -934,12 +935,12 @@ internal static class Rex
             else
             {
                 // [base] [+ disp8/disp32]
-                ea = *((&ctx->Rax) + rm);
+                ea = *(&ctx->Rax + rm);
                 if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); ea += (ulong)disp8; }
                 else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; ea += (ulong)(long)disp32; }
             }
 
-            ulong* dst = (&ctx->Rax) + reg;
+            ulong* dst = &ctx->Rax + reg;
             *dst = ea;
 
             Log($"LEA R{reg}, [..] => R{reg}=0x{ea:X}", offs);
@@ -957,22 +958,22 @@ internal static class Rex
 
             int offs = 2;
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // source
-            int rm = (modrm & 0x7) | (B ? 8 : 0);         // dest
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int reg = modrm >> 3 & 0x7 | (R ? 8 : 0);   // source
+            int rm = modrm & 0x7 | (B ? 8 : 0);         // dest
 
-            ulong* src = (&ctx->Rax) + reg;
+            ulong* src = &ctx->Rax + reg;
 
             if (mod == 0b11)
             {
                 // ADD r64, r64
-                ulong* dst = (&ctx->Rax) + rm;
+                ulong* dst = &ctx->Rax + rm;
                 ulong old = *dst;
                 *dst = old + *src;
 
-                bool zf = (*dst == 0);
-                bool sf = ((*dst & (1UL << 63)) != 0);
-                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+                bool zf = *dst == 0;
+                bool sf = (*dst & 1UL << 63) != 0;
+                ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
                 Log($"ADD R{rm}, R{reg} => 0x{old:X}+0x{*src:X}=0x{*dst:X}", offs);
                 ctx->Rip += (ulong)offs;
@@ -993,18 +994,18 @@ internal static class Rex
                 else if ((modrm & 0x7) == 0b100)
                 {
                     byte sib = *(address + offs++);
-                    byte scale = (byte)((sib >> 6) & 0x3);
-                    byte index = (byte)((sib >> 3) & 0x7);
+                    byte scale = (byte)(sib >> 6 & 0x3);
+                    byte index = (byte)(sib >> 3 & 0x7);
                     byte baseReg = (byte)(sib & 0x7);
-                    ulong baseVal = *((&ctx->Rax) + baseReg);
-                    ulong indexVal = (index == 0b100) ? 0 : *((&ctx->Rax) + index) << scale;
+                    ulong baseVal = *(&ctx->Rax + baseReg);
+                    ulong indexVal = index == 0b100 ? 0 : *(&ctx->Rax + index) << scale;
                     memAddr = baseVal + indexVal;
                     if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8; }
                     else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)disp32; }
                 }
                 else
                 {
-                    memAddr = *((&ctx->Rax) + rm);
+                    memAddr = *(&ctx->Rax + rm);
                     if (mod == 0b01) { long disp8 = *(sbyte*)(address + offs++); memAddr += (ulong)disp8; }
                     else if (mod == 0b10) { int disp32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)disp32; }
                 }
@@ -1012,9 +1013,9 @@ internal static class Rex
                 ulong old = *(ulong*)memAddr;
                 *(ulong*)memAddr = old + *src;
 
-                bool zf = (*(ulong*)memAddr == 0);
-                bool sf = ((*(ulong*)memAddr & (1UL << 63)) != 0);
-                ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+                bool zf = *(ulong*)memAddr == 0;
+                bool sf = (*(ulong*)memAddr & 1UL << 63) != 0;
+                ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
                 Log($"ADD QWORD PTR [0x{memAddr:X}], R{reg} => 0x{old:X}+0x{*src:X}=0x{*(ulong*)memAddr:X}", offs);
                 ctx->Rip += (ulong)offs;
@@ -1023,12 +1024,12 @@ internal static class Rex
         }
         if (op2 >= 0xB8 && op2 <= 0xBF)
         {
-            int reg = (op2 - 0xB8) | (B ? 8 : 0);   // extend to R8..R15 if REX.B
+            int reg = op2 - 0xB8 | (B ? 8 : 0);   // extend to R8..R15 if REX.B
 
             if ((rex & 0x08) != 0) // REX.W=1  => MOV r64, imm64 (10 bytes total)
             {
                 ulong imm64 = *(ulong*)(address + 2);
-                ulong* dst = (&ctx->Rax) + reg;
+                ulong* dst = &ctx->Rax + reg;
                 *dst = imm64;
                 Log($"MOV R{reg}, 0x{imm64:X}", 10);
                 ctx->Rip += 10;
@@ -1038,8 +1039,8 @@ internal static class Rex
             {
                 // REX.W=0 => MOV r32, imm32; still allow REX.B to choose R8..R15
                 uint imm32 = *(uint*)(address + 2);
-                ulong* dst = (&ctx->Rax) + reg;
-                *dst = (ulong)imm32;                // zero-extend to 64-bit
+                ulong* dst = &ctx->Rax + reg;
+                *dst = imm32;                // zero-extend to 64-bit
                 Log($"MOV R{reg}, 0x{imm32:X8}", 6);
                 ctx->Rip += 6;
                 return true;
@@ -1059,9 +1060,9 @@ internal static class Rex
             ctx->Rax = nw;
 
             // minimal flags you already use in branches (ZF/SF)
-            bool zf = (nw == 0);
-            bool sf = (nw & (1UL << 63)) != 0;
-            ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+            bool zf = nw == 0;
+            bool sf = (nw & 1UL << 63) != 0;
+            ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
             Log($"ADD RAX, 0x{(uint)imm32:X8} (sext) => 0x{old:X}+0x{(ulong)(long)imm32:X}=0x{nw:X}", 6);
             ctx->Rip += 6;
@@ -1176,21 +1177,21 @@ internal static class Rex
         {
             int offs = 2; // includes REX + opcode
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int grp = (modrm >> 3) & 0x7; // /0..7
-            int rm = (modrm & 0x7) | (B ? 8 : 0);
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int grp = modrm >> 3 & 0x7; // /0..7
+            int rm = modrm & 0x7 | (B ? 8 : 0);
 
             ulong memAddr = 0;
             ulong target;
 
             ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
             {
-                byte scaleBits = (byte)((sib >> 6) & 0x3);
-                byte idxBits = (byte)((sib >> 3) & 0x7);
+                byte scaleBits = (byte)(sib >> 6 & 0x3);
+                byte idxBits = (byte)(sib >> 3 & 0x7);
                 byte baseBits = (byte)(sib & 0x7);
 
                 int indexReg = idxBits;
-                if (idxBits != 0b100) indexReg |= (X ? 8 : 0);
+                if (idxBits != 0b100) indexReg |= X ? 8 : 0;
                 int baseReg = baseBits | (B ? 8 : 0);
 
                 ulong baseVal;
@@ -1200,12 +1201,12 @@ internal static class Rex
                     offsLocal += 4;
                     baseVal = (ulong)(long)disp32sib;
                 }
-                else baseVal = *((&ctx->Rax) + baseReg);
+                else baseVal = *(&ctx->Rax + baseReg);
 
                 ulong indexVal = 0;
                 if (idxBits != 0b100)
                 {
-                    indexVal = *((&ctx->Rax) + indexReg);
+                    indexVal = *(&ctx->Rax + indexReg);
                     indexVal <<= scaleBits;
                 }
                 return baseVal + indexVal;
@@ -1214,11 +1215,11 @@ internal static class Rex
             // --- operand decoding ---
             if (mod == 0b11)
             {
-                target = *((&ctx->Rax) + rm);
+                target = *(&ctx->Rax + rm);
             }
             else
             {
-                if (mod == 0b00 && ((modrm & 0x7) == 0b101))
+                if (mod == 0b00 && (modrm & 0x7) == 0b101)
                 {
                     int disp32 = *(int*)(address + offs);
                     offs += 4;
@@ -1234,7 +1235,7 @@ internal static class Rex
                 }
                 else
                 {
-                    memAddr = *((&ctx->Rax) + rm);
+                    memAddr = *(&ctx->Rax + rm);
                     if (mod == 0b01) { sbyte d8 = *(sbyte*)(address + offs++); memAddr = (ulong)((long)memAddr + d8); }
                     else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr = (ulong)((long)memAddr + d32); }
                 }
@@ -1249,7 +1250,7 @@ internal static class Rex
                     {
                         if (mod == 0b11)
                         {
-                            ((&ctx->Rax)[rm])++;
+                            (&ctx->Rax)[rm]++;
                             Log($"INC R{rm}", offs);
                         }
                         else
@@ -1266,7 +1267,7 @@ internal static class Rex
                     {
                         if (mod == 0b11)
                         {
-                            ((&ctx->Rax)[rm])--;
+                            (&ctx->Rax)[rm]--;
                             Log($"DEC R{rm}", offs);
                         }
                         else
@@ -1284,24 +1285,24 @@ internal static class Rex
                         ulong ret = ctx->Rip + (ulong)offs;
                         ctx->Rsp -= 8;
                         *(ulong*)ctx->Rsp = ret;
-                        Log($"CALL {((mod == 0b11) ? $"R{rm}" : $"[0x{memAddr:X}]")} => target=0x{target:X}, return=0x{ret:X}", offs);
+                        Log($"CALL {(mod == 0b11 ? $"R{rm}" : $"[0x{memAddr:X}]")} => target=0x{target:X}, return=0x{ret:X}", offs);
                         ctx->Rip = target;
                         return true;
                     }
 
                 case 4: // JMP r/m64
                     {
-                        Log($"JMP {((mod == 0b11) ? $"R{rm}" : $"[0x{memAddr:X}]")} => target=0x{target:X}", offs);
+                        Log($"JMP {(mod == 0b11 ? $"R{rm}" : $"[0x{memAddr:X}]")} => target=0x{target:X}", offs);
                         ctx->Rip = target;
                         return true;
                     }
 
                 case 6: // PUSH r/m64
                     {
-                        ulong val = (mod == 0b11) ? *((&ctx->Rax) + rm) : *(ulong*)memAddr;
+                        ulong val = mod == 0b11 ? *(&ctx->Rax + rm) : *(ulong*)memAddr;
                         ctx->Rsp -= 8;
                         *(ulong*)ctx->Rsp = val;
-                        Log($"PUSH {((mod == 0b11) ? $"R{rm}" : $"[0x{memAddr:X}]")} => value=0x{val:X}", offs);
+                        Log($"PUSH {(mod == 0b11 ? $"R{rm}" : $"[0x{memAddr:X}]")} => value=0x{val:X}", offs);
                         ctx->Rip += (ulong)offs;
                         return true;
                     }
@@ -1323,15 +1324,15 @@ internal static class Rex
 
             int offs = 2;
             byte modrm = *(address + offs++);
-            byte mod = (byte)((modrm >> 6) & 0x3);
-            int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0);   // src (REX.R)
-            int rm = (modrm & 0x7) | (B ? 8 : 0);         // dst (REX.B)
-            ulong src = *((&ctx->Rax) + reg);
+            byte mod = (byte)(modrm >> 6 & 0x3);
+            int reg = modrm >> 3 & 0x7 | (R ? 8 : 0);   // src (REX.R)
+            int rm = modrm & 0x7 | (B ? 8 : 0);         // dst (REX.B)
+            ulong src = *(&ctx->Rax + reg);
             ulong val;
 
             if (mod == 0b11)
             {
-                val = *((&ctx->Rax) + rm);
+                val = *(&ctx->Rax + rm);
             }
             else
             {
@@ -1347,20 +1348,20 @@ internal static class Rex
                 else if ((modrm & 0x7) == 0b100)
                 {
                     byte sib = *(address + offs++);
-                    byte scale = (byte)((sib >> 6) & 0x3);
-                    byte index = (byte)((sib >> 3) & 0x7);
+                    byte scale = (byte)(sib >> 6 & 0x3);
+                    byte index = (byte)(sib >> 3 & 0x7);
                     byte baseBits = (byte)(sib & 0x7);
-                    int indexReg = index; if (index != 0b100) indexReg |= (X ? 8 : 0);
+                    int indexReg = index; if (index != 0b100) indexReg |= X ? 8 : 0;
                     int baseReg = baseBits | (B ? 8 : 0);
-                    ulong baseVal = *((&ctx->Rax) + baseReg);
-                    ulong indexVal = (index == 0b100) ? 0 : (*((&ctx->Rax) + indexReg) << scale);
+                    ulong baseVal = *(&ctx->Rax + baseReg);
+                    ulong indexVal = index == 0b100 ? 0 : *(&ctx->Rax + indexReg) << scale;
                     memAddr = baseVal + indexVal;
                     if (mod == 0b01) { long d8 = *(sbyte*)(address + offs++); memAddr += (ulong)d8; }
                     else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)d32; }
                 }
                 else
                 {
-                    memAddr = *((&ctx->Rax) + rm);
+                    memAddr = *(&ctx->Rax + rm);
                     if (mod == 0b01) { long d8 = *(sbyte*)(address + offs++); memAddr += (ulong)d8; }
                     else if (mod == 0b10) { int d32 = *(int*)(address + offs); offs += 4; memAddr += (ulong)(long)d32; }
                 }
@@ -1369,11 +1370,11 @@ internal static class Rex
             }
 
             ulong res = val & src;
-            bool zf = (res == 0);
-            bool sf = ((res >> 63) & 1) != 0;
-            ctx->EFlags = (uint)((ctx->EFlags & ~0xC0u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u));
+            bool zf = res == 0;
+            bool sf = (res >> 63 & 1) != 0;
+            ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
 
-            Log($"TEST {((mod == 0b11) ? $"R{rm}" : "r/m64")}, R{reg} => ZF={(zf ? 1 : 0)} SF={(sf ? 1 : 0)}", offs);
+            Log($"TEST {(mod == 0b11 ? $"R{rm}" : "r/m64")}, R{reg} => ZF={(zf ? 1 : 0)} SF={(sf ? 1 : 0)}", offs);
             ctx->Rip += (ulong)offs;
             return true;
         }
@@ -1381,8 +1382,8 @@ internal static class Rex
         if (op2 == 0x63)
         {
             byte modrm = *(address + 1);
-            byte mod = (byte)((modrm >> 6) & 3);
-            byte reg = (byte)((modrm >> 3) & 7);
+            byte mod = (byte)(modrm >> 6 & 3);
+            byte reg = (byte)(modrm >> 3 & 7);
             byte rm = (byte)(modrm & 7);
             int instrLen = 2;
             long value = 0;
@@ -1390,18 +1391,18 @@ internal static class Rex
             if (mod == 0b11)
             {
                 // Register to register
-                int src = (int)((&ctx->Rax)[rm]);
+                int src = (int)(&ctx->Rax)[rm];
                 value = src; // sign-extend
-                ((&ctx->Rax)[reg]) = (ulong)value;
+                (&ctx->Rax)[reg] = (ulong)value;
                 Log($"MOVSXD R{reg}, R{rm}", instrLen);
             }
             else
             {
                 // Memory operand (simplified)
-                ulong addr = ((&ctx->Rax)[rm]);
+                ulong addr = (&ctx->Rax)[rm];
                 int src = *(int*)addr;
                 value = src; // sign-extend 32 -> 64
-                ((&ctx->Rax)[reg]) = (ulong)value;
+                (&ctx->Rax)[reg] = (ulong)value;
                 Log($"MOVSXD R{reg}, [0x{addr:X}]", instrLen);
             }
 
@@ -1437,13 +1438,13 @@ internal static class Rex
         offs++; // consume opcode
 
         byte modrm = ip[offs++]; // /r
-        byte mod = (byte)((modrm >> 6) & 3);
-        int reg = (modrm >> 3) & 7; // source Gv
-        int rm = (modrm & 7);      // destination Ev
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7; // source Gv
+        int rm = modrm & 7;      // destination Ev
 
         // Extend indices with REX.R / REX.B
-        int src = rexR ? (reg | 8) : reg;
-        int dst = rexB ? (rm | 8) : rm;
+        int src = rexR ? reg | 8 : reg;
+        int dst = rexB ? rm | 8 : rm;
 
         ulong* R = &ctx->Rax;
 
@@ -1469,7 +1470,7 @@ internal static class Rex
             else
             {
                 // Simple [reg] + disp
-                addr = *((&ctx->Rax) + dst);
+                addr = *(&ctx->Rax + dst);
                 if (mod == 0b01) { long d8 = *(sbyte*)(ip + offs); offs += 1; addr += (ulong)d8; }
                 else if (mod == 0b10) { int d32 = *(int*)(ip + offs); offs += 4; addr += (ulong)(long)d32; }
             }
@@ -1486,16 +1487,16 @@ internal static class Rex
             dstVal = is64 ? *(ulong*)addr : *(uint*)addr;
 
         // Narrow/zero-extend src (XOR is width-specific)
-        ulong s = is64 ? srcVal : (srcVal & 0xFFFF_FFFFUL);
-        ulong d = is64 ? dstVal : (dstVal & 0xFFFF_FFFFUL);
+        ulong s = is64 ? srcVal : srcVal & 0xFFFF_FFFFUL;
+        ulong d = is64 ? dstVal : dstVal & 0xFFFF_FFFFUL;
         ulong r = d ^ s;
 
         // Write back
         if (mod == 0b11)
         {
             if (is64) R[dst] = r;
-            else R[dst] = (R[dst] & 0xFFFF_FFFF00000000UL) | (uint)r; // r/m32 write zero-extends architecturally, but since we write to the 64-bit slot, keep upper as-is or, if you want architectural behavior, force zero-extend:
-                                                                      // R[dst] = (ulong)(uint)r;  // <- use this if you want true x64 semantics: writing to a 32-bit GPR zero-extends to 64 bits
+            else R[dst] = R[dst] & 0xFFFF_FFFF00000000UL | (uint)r; // r/m32 write zero-extends architecturally, but since we write to the 64-bit slot, keep upper as-is or, if you want architectural behavior, force zero-extend:
+                                                                    // R[dst] = (ulong)(uint)r;  // <- use this if you want true x64 semantics: writing to a 32-bit GPR zero-extends to 64 bits
         }
         else
         {
@@ -1508,12 +1509,12 @@ internal static class Rex
         uint f = ctx->EFlags;
         f &= ~(CF | OF | ZF | SF | PF);   // clear CF,OF,ZF,SF,PF; preserve AF
         ulong mask = is64 ? 0x8000_0000_0000_0000UL : 0x8000_0000UL;
-        if ((r == 0)) f |= ZF;
+        if (r == 0) f |= ZF;
         if ((r & mask) != 0) f |= SF;
 
         // Parity of low byte
         byte low = (byte)(r & 0xFF);
-        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0) f |= PF;
+        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0) f |= PF;
         ctx->EFlags = f;
 
         string srcDesc = is64 ? $"R{src}" : $"R{src}d";
@@ -1527,9 +1528,9 @@ internal static class Rex
         // 48 3B /r → CMP r64, r/m64
         int offs = 2;
         byte modrm = ip[offs++];
-        byte mod = (byte)((modrm >> 6) & 3);
-        int reg = (modrm >> 3) & 7; // destination (r64)
-        int rm = (modrm & 7);      // source (r/m64)
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7; // destination (r64)
+        int rm = modrm & 7;      // source (r/m64)
         ulong* R = &ctx->Rax;
 
         ulong lhs = R[reg]; // left operand
@@ -1564,16 +1565,16 @@ internal static class Rex
 
         // ---- Update flags ----
         const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
-        uint f = ctx->EFlags & ~((uint)(CF | PF | AF | ZF | SF | OF));
+        uint f = ctx->EFlags & ~(CF | PF | AF | ZF | SF | OF);
 
         if (lhs < rhs) f |= CF;                    // carry/borrow
         if (result == 0) f |= ZF;
         if ((result & 0x8000_0000_0000_0000UL) != 0) f |= SF;
-        if ((((lhs ^ rhs) & (lhs ^ result)) & 0x8000_0000_0000_0000UL) != 0) f |= OF;
+        if (((lhs ^ rhs) & (lhs ^ result) & 0x8000_0000_0000_0000UL) != 0) f |= OF;
 
         // Parity flag of low byte
         byte low = (byte)(result & 0xFF);
-        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0)
+        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0)
             f |= PF;
 
         ctx->EFlags = f;

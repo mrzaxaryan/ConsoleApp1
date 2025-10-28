@@ -20,7 +20,6 @@ public static unsafe class ControlFlow
             case >= X64Opcodes.JO_SHORT and <= X64Opcodes.JG_SHORT:
                 return HandleShortConditionalJump(ctx, address, Log);
             default:
-                Log($"Unsupported control flow opcode 0x{opcode:X2}", 8);
                 return false;
         }
     }

@@ -8,14 +8,9 @@ public static unsafe class Miscellaneous
     {
         switch (opcode)
         {
-            case X64Opcodes.NOP:
-                return HandleNop(ctx, Log);
-
-            case X64Opcodes.CMP_AL_IMM8:
-                return HandleCmpAlImm8(ctx, address, Log);
-
+            case X64Opcodes.NOP: return HandleNop(ctx, Log);
+            case X64Opcodes.CMP_AL_IMM8: return HandleCmpAlImm8(ctx, address, Log);
             default:
-                Log($"Unhandled miscellaneous opcode 0x{opcode:X2}", 8);
                 return false;
         }
     }

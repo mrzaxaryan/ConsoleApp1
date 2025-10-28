@@ -10,27 +10,16 @@ public static unsafe class TwoByteOpcodes
     public static bool Handle(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         byte op2 = *(address + 1);
-
         switch (op2)
         {
-            case X64Opcodes.JNE_NEAR:
-                return HandleJneNear(ctx, address, Log);
-
-            case X64Opcodes.JE_NEAR:
-                return HandleJeNear(ctx, address, Log);
-
-            case X64Opcodes.MOVZX_GvEw:
-                return HandleMovzxGvEw(ctx, address, Log);
-
-            case X64Opcodes.MOVZX_R32_RM8:
-                return HandleMovzxR32Rm8(ctx, address, Log);
-
-            case X64Opcodes.SETE:
-                return HandleSetcc(ctx, address, Log, condition: "ZF");
-
+            case X64Opcodes.JNE_NEAR: return HandleJneNear(ctx, address, Log);
+            case X64Opcodes.JE_NEAR: return HandleJeNear(ctx, address, Log);
+            case X64Opcodes.MOVZX_GvEw: return HandleMovzxGvEw(ctx, address, Log);
+            case X64Opcodes.MOVZX_R32_RM8: return HandleMovzxR32Rm8(ctx, address, Log);
+            case X64Opcodes.SETE: return HandleSetcc(ctx, address, Log, "ZF");
             default:
-                Log($"Unsupported two-byte opcode 0F {op2:X2}", 8);
-                throw new NotImplementedException($"0F {op2:X2} not implemented");
+                Log($"Unhandled two-byte opcode 0F {op2:X2}", 8);
+                return false;
         }
     }
     private static unsafe bool HandleSetcc(CONTEXT* ctx, byte* ip, Action<string, int> Log, string condition)

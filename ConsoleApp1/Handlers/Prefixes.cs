@@ -8,23 +8,16 @@ public static unsafe class Prefixes
     {
         switch (opcode)
         {
-            case X64Opcodes.GS_PREFIX:
-                return HandleSegmentPrefix(ctx, address, Log);
-
-            case X64Opcodes.OPSIZE_PREFIX:
-                return HandleOperandSizePrefix(ctx, address, Log);
-
+            case X64Opcodes.GS_PREFIX: return HandleSegmentPrefix(ctx, address, Log);
+            case X64Opcodes.OPSIZE_PREFIX: return HandleOperandSizePrefix(ctx, address, Log);
             case X64Opcodes.REX_PREFIX:
             case X64Opcodes.REX_B_GROUP:
             case X64Opcodes.REX_R_GROUP:
             case X64Opcodes.REX_W_GROUP:
                 return Rex.Handle(ctx, address, Log);
-
             case X64Opcodes.TWO_BYTE:
                 return TwoByteOpcodes.Handle(ctx, address, Log);
-
             default:
-                Log($"Unhandled prefix opcode 0x{opcode:X2}", 8);
                 return false;
         }
     }

@@ -92,8 +92,6 @@ public static unsafe class MovOperations
         ctx->Rip += (ulong)offs;
         return true;
     }
-
-
     private static unsafe bool HandleMovRm64R64(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         byte modrm = *(address + 1);
