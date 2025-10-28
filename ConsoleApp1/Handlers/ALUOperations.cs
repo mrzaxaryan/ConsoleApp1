@@ -45,49 +45,70 @@ public static unsafe class ALUOperations
     }
     private static unsafe bool HandleTestEwGw(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
-        if (ip[0] != 0x66 || ip[1] != 0x85) return false;
+        // 66 85 /r → TEST r/m16, r16
+        if (ip[0] != 0x66 || ip[1] != 0x85)
+            return false;
 
-        byte modrm = ip[2];
-        byte mod = (byte)(modrm >> 6 & 0x3);
-        int reg = modrm >> 3 & 0x7;
-        int rm = modrm & 0x7;
-        int len = 3;
+        int offs = 2;
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        int reg = (modrm >> 3) & 0x7;  // source (r16)
+        int rm = modrm & 0x7;         // destination (r/m16)
+        ulong* R = &ctx->Rax;
 
         ushort lhs, rhs;
+        ulong addr = 0;
+        string lhsDesc, rhsDesc;
 
-        // We only need the AX/word forms used here, but implement the general /r form:
         if (mod == 0b11)
         {
-            lhs = (ushort)((&ctx->Rax)[rm] & 0xFFFF);
-            rhs = (ushort)((&ctx->Rax)[reg] & 0xFFFF);
-            Log($"TEST R{rm}w, R{reg}w", len);
+            lhs = (ushort)(R[rm] & 0xFFFF);
+            rhs = (ushort)(R[reg] & 0xFFFF);
+            lhsDesc = $"R{rm}w";
+            rhsDesc = $"R{reg}w";
         }
         else
         {
-            ulong addr = (&ctx->Rax)[rm];
+            addr = R[rm];
+            if (mod == 0b01)
+            {
+                long d8 = *(sbyte*)(ip + offs); offs += 1;
+                addr += (ulong)d8;
+            }
+            else if (mod == 0b10)
+            {
+                int d32 = *(int*)(ip + offs); offs += 4;
+                addr += (ulong)(long)d32;
+            }
+
             lhs = *(ushort*)addr;
-            rhs = (ushort)((&ctx->Rax)[reg] & 0xFFFF);
-            Log($"TEST WORD PTR [0x{addr:X}], R{reg}w", len);
+            rhs = (ushort)(R[reg] & 0xFFFF);
+            lhsDesc = $"WORD PTR [0x{addr:X}]";
+            rhsDesc = $"R{reg}w";
         }
 
-        uint res = (uint)(lhs & rhs);
+        ushort res = (ushort)(lhs & rhs);
 
-        // Update flags: ZF, SF, PF; clear CF/OF for TEST
-        // (assuming you store flags in EFlags like Windows CONTEXT does)
-        const uint CF = 1 << 0, PF = 1 << 2, ZF = 1 << 6, SF = 1 << 7, OF = 1 << 11;
-        uint f = ctx->EFlags;
-        f &= ~(CF | OF | ZF | SF | PF);
+        // ---- Update flags ----
+        const uint CF = 1u << 0, PF = 1u << 2, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
+        uint f = ctx->EFlags & ~(CF | OF | ZF | SF | PF);
 
-        if ((res & 0xFFFF) == 0) f |= ZF;
-        if ((res >> 15 & 1) != 0) f |= SF;
+        if (res == 0)
+            f |= ZF;
+        if ((res & 0x8000) != 0)
+            f |= SF;
 
-        // Simple parity of low byte:
+        // Parity flag (even number of 1s in low byte)
         byte low = (byte)(res & 0xFF);
-        bool parity = (System.Numerics.BitOperations.PopCount(low) & 1) == 0;
-        if (parity) f |= PF;
+        if ((System.Numerics.BitOperations.PopCount(low) & 1) == 0)
+            f |= PF;
 
         ctx->EFlags = f;
-        ctx->Rip += (ulong)len;
+
+        Log($"TEST {lhsDesc}, {rhsDesc} => res=0x{res:X4} "
+            + $"[ZF={(f & ZF) != 0}, SF={(f & SF) != 0}, PF={(f & PF) != 0}]", offs);
+
+        ctx->Rip += (ulong)offs;
         return true;
     }
     private static bool HandleAddRm64Imm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
