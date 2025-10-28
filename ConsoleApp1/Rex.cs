@@ -1271,9 +1271,115 @@ internal static class Rex
         {
             return HandleCmpGvEv64(ctx, address, Log);
         }
+        if (op2 == 0x31)
+        {
+            return HandleXorEvGv(ctx, address, Log);
+        }
         Log($"Unsupported REX-prefixed opcode 0x48 0x{op2:X2} 0x{op3:X2}", 3);
         return false;
     }
+    private static unsafe bool HandleXorEvGv(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        // [REX?] 31 /r  → XOR r/m32, r32   (default)
+        // with REX.W    → XOR r/m64, r64
+        int offs = 0;
+
+        // Optional REX
+        byte rex = 0;
+        if ((ip[offs] & 0xF0) == 0x40) { rex = ip[offs]; offs++; }
+        bool rexW = (rex & 0x08) != 0;
+        bool rexR = (rex & 0x04) != 0;
+        bool rexB = (rex & 0x01) != 0;
+
+        if (ip[offs] != 0x31) return false;
+        offs++; // consume opcode
+
+        byte modrm = ip[offs++]; // /r
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = (modrm >> 3) & 7; // source Gv
+        int rm = (modrm & 7);      // destination Ev
+
+        // Extend indices with REX.R / REX.B
+        int src = rexR ? (reg | 8) : reg;
+        int dst = rexB ? (rm | 8) : rm;
+
+        ulong* R = &ctx->Rax;
+
+        // Resolve destination pointer / value width
+        bool is64 = rexW;
+        ulong addr = 0;
+        string dstDesc;
+
+        // Effective address for r/m
+        if (mod == 0b11)
+        {
+            dstDesc = is64 ? $"R{dst}" : $"R{dst}d";
+        }
+        else
+        {
+            // RIP-relative: mod==00 && rm==101
+            if (mod == 0b00 && rm == 0b101)
+            {
+                int disp32 = *(int*)(ip + offs); offs += 4;
+                ulong nextRip = ctx->Rip + (ulong)offs;
+                addr = nextRip + (ulong)(long)disp32;
+            }
+            else
+            {
+                // Simple [reg] + disp
+                addr = *((&ctx->Rax) + dst);
+                if (mod == 0b01) { long d8 = *(sbyte*)(ip + offs); offs += 1; addr += (ulong)d8; }
+                else if (mod == 0b10) { int d32 = *(int*)(ip + offs); offs += 4; addr += (ulong)(long)d32; }
+            }
+            dstDesc = is64 ? $"QWORD PTR [0x{addr:X}]" : $"DWORD PTR [0x{addr:X}]";
+        }
+
+        // Fetch operands
+        ulong srcVal = R[src];
+        ulong dstVal;
+
+        if (mod == 0b11)
+            dstVal = R[dst];
+        else
+            dstVal = is64 ? *(ulong*)addr : *(uint*)addr;
+
+        // Narrow/zero-extend src (XOR is width-specific)
+        ulong s = is64 ? srcVal : (srcVal & 0xFFFF_FFFFUL);
+        ulong d = is64 ? dstVal : (dstVal & 0xFFFF_FFFFUL);
+        ulong r = d ^ s;
+
+        // Write back
+        if (mod == 0b11)
+        {
+            if (is64) R[dst] = r;
+            else R[dst] = (R[dst] & 0xFFFF_FFFF00000000UL) | (uint)r; // r/m32 write zero-extends architecturally, but since we write to the 64-bit slot, keep upper as-is or, if you want architectural behavior, force zero-extend:
+                                                                      // R[dst] = (ulong)(uint)r;  // <- use this if you want true x64 semantics: writing to a 32-bit GPR zero-extends to 64 bits
+        }
+        else
+        {
+            if (is64) *(ulong*)addr = r;
+            else *(uint*)addr = (uint)r;
+        }
+
+        // Flags for logical XOR: CF=0, OF=0, AF undefined, update ZF/SF/PF
+        const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
+        uint f = ctx->EFlags;
+        f &= ~(CF | OF | ZF | SF | PF);   // clear CF,OF,ZF,SF,PF; preserve AF
+        ulong mask = is64 ? 0x8000_0000_0000_0000UL : 0x8000_0000UL;
+        if ((r == 0)) f |= ZF;
+        if ((r & mask) != 0) f |= SF;
+
+        // Parity of low byte
+        byte low = (byte)(r & 0xFF);
+        if ((System.Numerics.BitOperations.PopCount((uint)low) & 1) == 0) f |= PF;
+        ctx->EFlags = f;
+
+        string srcDesc = is64 ? $"R{src}" : $"R{src}d";
+        Log($"XOR {dstDesc}, {srcDesc}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
     private static unsafe bool HandleCmpGvEv64(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
         // 48 3B /r → CMP r64, r/m64

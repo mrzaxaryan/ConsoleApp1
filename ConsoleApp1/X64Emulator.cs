@@ -1733,41 +1733,59 @@ public static unsafe class X64Emulator
         ctx->Rip = newRip;
         return true;
     }
-    private static bool HandleSegmentPrefix(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    private static unsafe bool HandleSegmentPrefix(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
-        byte prefix = *address; // 0x65 (GS)
-        if (prefix != 0x65)
+        if (*address != 0x65) // only GS prefix
             return false;
 
         byte* next = address + 1;
 
-        // 65 48 8B 00  => MOV RAX, [GS:RAX]
-        // General pattern: 65 48 8B /r (modrm with mod==00)
-        if (*next == 0x48 && *(next + 1) == 0x8B)
+        // Case 1: 65 48 8B 04 25 <disp32> → MOV RAX, [GS:disp32]
+        if (*next == 0x48 && *(next + 1) == 0x8B && *(next + 2) == 0x04 && *(next + 3) == 0x25)
         {
-            byte modrm = *(next + 2);
-            byte mod = (byte)((modrm >> 6) & 3);
-            byte reg = (byte)((modrm >> 3) & 7);
-            byte rm = (byte)(modrm & 7);
+            uint disp32 = *(uint*)(next + 4);   // read displacement
+            ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
+            ulong addr = tebBase + disp32;
+            ulong value = *(ulong*)addr;
 
-            if (mod == 0) // no displacement
-            {
-                ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
-                ulong addr = tebBase + ((&ctx->Rax)[rm]);
-                ulong value = *(ulong*)addr;
-                ((&ctx->Rax)[reg]) = value;
-
-                Log($"MOV R{reg}, [GS:R{rm}] => R{reg}=0x{value:X} (addr=0x{addr:X}, GS=0x{tebBase:X})", 4);
-                ctx->Rip += 4;
-                return true;
-            }
+            ctx->Rax = value;
+            Log($"MOV RAX, [GS:0x{disp32:X}] => RAX=0x{value:X} (TEB base=0x{tebBase:X})", 9);
+            ctx->Rip += 9;
+            return true;
         }
 
+        // Case 2: 65 48 8B /r (register-based addressing, no disp32)
+        if (*next == 0x48 && *(next + 1) == 0x8B)
+        {
+            byte prefix = *address; // 0x65 (GS)
+                                    //    if (prefix != 0x65)
+                                    //        return false;
+            // 65 48 8B 00  => MOV RAX, [GS:RAX]
+            // General pattern: 65 48 8B /r (modrm with mod==00)
+            if (*next == 0x48 && *(next + 1) == 0x8B)
+            {
+                byte modrm = *(next + 2);
+                byte mod = (byte)((modrm >> 6) & 3);
+                byte reg = (byte)((modrm >> 3) & 7);
+                byte rm = (byte)(modrm & 7);
+
+                if (mod == 0) // no displacement
+                {
+                    ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
+                    var offset = ((&ctx->Rax)[rm]);
+                    ulong addr = tebBase + offset;
+                    ulong value = *(ulong*)addr;
+                    ((&ctx->Rax)[reg]) = value;
+
+                    Log($"MOV R{reg}, [GS:R{rm}] => R{reg}=0x{value:X} (addr=0x{addr:X}, GS=0x{tebBase:X})", 4);
+                    ctx->Rip += 4;
+                    return true;
+                }
+            }
+        }
 
         Log("Unhandled GS-prefixed opcode", 8);
         return false;
     }
-
-
 }
 
