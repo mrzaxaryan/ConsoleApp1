@@ -111,12 +111,12 @@ public static unsafe class ALUOperations
         ctx->Rip += (ulong)offs;
         return true;
     }
-    private static bool HandleAddRm64Imm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    private static unsafe bool HandleAddRm64Imm8(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         // 48 83 /0 r/m64, imm8  (ADD)
         byte modrm = *(address + 2);
-        byte mod = (byte)(modrm >> 6 & 0x3);
-        byte reg = (byte)(modrm >> 3 & 0x7);
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        byte reg = (byte)((modrm >> 3) & 0x7);
         byte rm = (byte)(modrm & 0x7);
         if (reg != 0)
         {
@@ -124,23 +124,23 @@ public static unsafe class ALUOperations
             return false;
         }
 
-        int offs = 3; // start at ModRM
+        int offs = 3;
         ulong memAddr = 0;
+        ulong* R = &ctx->Rax;
 
-        // helper for SIB forms
+        // SIB resolver
         ulong computeSibAddr(byte sib, byte modLocal, ref int offsLocal)
         {
-            byte scaleBits = (byte)(sib >> 6 & 0x3);
-            byte idxBits = (byte)(sib >> 3 & 0x7);
+            byte scaleBits = (byte)((sib >> 6) & 0x3);
+            byte idxBits = (byte)((sib >> 3) & 0x7);
             byte baseBits = (byte)(sib & 0x7);
 
             ulong baseVal = 0, indexVal = 0;
             if (baseBits != 0b101)
-                baseVal = *(&ctx->Rax + baseBits);
+                baseVal = R[baseBits];
             if (idxBits != 0b100)
             {
-                indexVal = *(&ctx->Rax + idxBits);
-                indexVal <<= scaleBits;
+                indexVal = R[idxBits] << scaleBits;
             }
 
             ulong addr = baseVal + indexVal;
@@ -157,20 +157,20 @@ public static unsafe class ALUOperations
             return addr;
         }
 
+        ulong oldVal, newVal;
+        long imm8;
+
         if (mod == 0b11)
         {
-            // register form, e.g. ADD RAX, imm8
-            byte imm8 = *(address + offs++);
-            ulong* dst = &ctx->Rax + rm;
-            ulong old = *dst;
-            *dst = old + imm8;
-            Log($"ADD R{rm}, 0x{imm8:X2} => 0x{old:X}+0x{imm8:X}=0x{*dst:X}", offs);
-            ctx->Rip += (ulong)offs;
-            return true;
+            imm8 = *(sbyte*)(address + offs++);
+            ulong* dst = R + rm;
+            oldVal = *dst;
+            newVal = oldVal + (ulong)imm8;
+            *dst = newVal;
+            Log($"ADD R{rm}, {imm8}", offs);
         }
         else
         {
-            // memory form
             if (mod == 0b00)
             {
                 if (rm == 0b100)
@@ -178,10 +178,7 @@ public static unsafe class ALUOperations
                     byte sib = *(address + offs++);
                     memAddr = computeSibAddr(sib, mod, ref offs);
                 }
-                else
-                {
-                    memAddr = *(&ctx->Rax + rm);
-                }
+                else memAddr = R[rm];
             }
             else if (mod == 0b01)
             {
@@ -193,7 +190,7 @@ public static unsafe class ALUOperations
                 else
                 {
                     long disp8 = *(sbyte*)(address + offs++);
-                    memAddr = *(&ctx->Rax + rm) + (ulong)disp8;
+                    memAddr = R[rm] + (ulong)disp8;
                 }
             }
             else if (mod == 0b10)
@@ -206,19 +203,32 @@ public static unsafe class ALUOperations
                 else
                 {
                     int disp32 = *(int*)(address + offs); offs += 4;
-                    memAddr = *(&ctx->Rax + rm) + (ulong)(long)disp32;
+                    memAddr = R[rm] + (ulong)(long)disp32;
                 }
             }
 
-            byte imm8 = *(address + offs++);
-            ulong oldVal = *(ulong*)memAddr;
-            ulong newVal = oldVal + imm8;
+            imm8 = *(sbyte*)(address + offs++);
+            oldVal = *(ulong*)memAddr;
+            newVal = oldVal + (ulong)imm8;
             *(ulong*)memAddr = newVal;
-
-            Log($"ADD QWORD PTR [0x{memAddr:X}], 0x{imm8:X2} => 0x{oldVal:X}+0x{imm8:X}=0x{newVal:X}", offs);
-            ctx->Rip += (ulong)offs;
-            return true;
+            Log($"ADD QWORD PTR [0x{memAddr:X}], {imm8}", offs);
         }
+
+        // ---- Update Flags ----
+        const uint CF = 1u << 0, PF = 1u << 2, AF = 1u << 4, ZF = 1u << 6, SF = 1u << 7, OF = 1u << 11;
+        uint f = ctx->EFlags & ~(CF | PF | AF | ZF | SF | OF);
+
+        ulong result = newVal;
+        if (result < oldVal) f |= CF;
+        if (((oldVal ^ (ulong)imm8) & (oldVal ^ result) & 0x8000_0000_0000_0000UL) != 0) f |= OF;
+        if (((oldVal ^ (ulong)imm8 ^ result) & 0x10) != 0) f |= AF;
+        if (result == 0) f |= ZF;
+        if ((result & 0x8000_0000_0000_0000UL) != 0) f |= SF;
+        if ((System.Numerics.BitOperations.PopCount((byte)result) & 1) == 0) f |= PF;
+
+        ctx->EFlags = f;
+        ctx->Rip += (ulong)offs;
+        return true;
     }
     private static unsafe bool HandleGrp1_EdIb(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
