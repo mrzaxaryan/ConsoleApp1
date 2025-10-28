@@ -9,7 +9,7 @@ public static unsafe class ControlFlow
         switch (opcode)
         {
             case X64Opcodes.CALL: return HandleCall(ctx, address, Log);
-            case X64Opcodes.RET: return HandleRet(ctx, Log);
+            case X64Opcodes.RET: return HandleRet(ctx, address, Log);
             case X64Opcodes.LEAVE: return HandleLeave(ctx, Log);
             case X64Opcodes.JMP_NEAR: return HandleJmpNear(ctx, address, Log);
             case X64Opcodes.JMP_SHORT: return HandleJmpShort(ctx, address, Log);
@@ -23,28 +23,53 @@ public static unsafe class ControlFlow
                 return false;
         }
     }
-    private static bool HandleCall(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    private static unsafe bool HandleCall(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
-        int rel32 = *(int*)(address + 1);
-        ulong returnAddress = ctx->Rip + 5;
-        ulong newRip = returnAddress + (ulong)rel32;
-        Log($"CALL to 0x{newRip:X}, return address 0x{returnAddress:X}", 5);
+        // E8 rel32 → CALL near relative
+        const int instrLen = 5;
+
+        // Displacement is a signed 32-bit relative offset
+        long rel32 = *(int*)(address + 1);
+
+        ulong returnAddress = ctx->Rip + (ulong)instrLen;
+        ulong newRip = (ulong)((long)ctx->Rip + instrLen + rel32);
+
+        // Push return address
         ctx->Rsp -= 8;
         *(ulong*)ctx->Rsp = returnAddress;
+
+        // Transfer control
         ctx->Rip = newRip;
+
+        Log($"CALL 0x{newRip:X} (rel32=0x{rel32:X8}), return=0x{returnAddress:X}", instrLen);
         return true;
     }
-    private static bool HandleRet(CONTEXT* ctx, Action<string, int> Log)
+    private static unsafe bool HandleRet(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
+        // 0xC3 → RET
+        // 0xC2 iw → RET imm16 (pops immediate bytes)
+        byte opcode = *ip;
+        int offs = 1;
+
+        // Pop return address
         ulong returnAddress = *(ulong*)ctx->Rsp;
         ctx->Rsp += 8;
-        Log($"RET => RIP=0x{returnAddress:X}", 1);
+
+        ushort stackAdjust = 0;
+        if (opcode == 0xC2)
+        {
+            stackAdjust = *(ushort*)(ip + offs);
+            offs += 2;
+            ctx->Rsp += stackAdjust; // Callee cleanup
+        }
+
         ctx->Rip = returnAddress;
+        Log($"RET{(opcode == 0xC2 ? $" {stackAdjust}" : "")} => RIP=0x{returnAddress:X}", offs);
         return true;
     }
-    private static bool HandleLeave(CONTEXT* ctx, Action<string, int> Log)
+    private static unsafe bool HandleLeave(CONTEXT* ctx, Action<string, int> Log)
     {
-        // LEAVE: MOV RSP, RBP; POP RBP
+        // LEAVE = MOV RSP, RBP; POP RBP
         ctx->Rsp = ctx->Rbp;
         ctx->Rbp = *(ulong*)ctx->Rsp;
         ctx->Rsp += 8;
@@ -54,69 +79,98 @@ public static unsafe class ControlFlow
     }
     private static unsafe bool HandleJmpNear(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
-        // E9 cd cd cd cd   ; rel32 is SIGNED
-        int rel32 = *(int*)(address + 1);
-        ulong nextRip = ctx->Rip + 5;                       // length = 5 bytes
-        ulong target = nextRip + (ulong)(long)rel32;       // sign-extend to 64-bit
+        // E9 cd cd cd cd  →  JMP rel32 (signed displacement)
+        const int instrLen = 5;
 
-        Log($"JMP near {rel32:+#;-#;0} -> 0x{target:X}", 5);
+        int rel32 = *(int*)(address + 1); // signed 32-bit offset
+        ulong nextRip = ctx->Rip + instrLen;
+        ulong target = (ulong)((long)nextRip + rel32); // sign-extend to 64-bit
+
+        Log($"JMP near {rel32:+#;-#;0} (to 0x{target:X})", instrLen);
+
         ctx->Rip = target;
         return true;
     }
-    private static bool HandleJmpShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    private static unsafe bool HandleJmpShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
+        // EB cb  →  JMP short (rel8 signed)
+        const int instrLen = 2;
+
         sbyte rel8 = *(sbyte*)(address + 1);
-        ulong nextRip = ctx->Rip + 2;
-        long target = (long)nextRip + rel8;
+        ulong nextRip = ctx->Rip + instrLen;
+        ulong target = (ulong)((long)nextRip + rel8);
 
-        Log($"JMP short {rel8:+#;-#;0} -> 0x{(ulong)target:X}", 2);
+        Log($"JMP short {rel8:+#;-#;0} (to 0x{target:X})", instrLen);
 
-        ctx->Rip = (ulong)target;
+        ctx->Rip = target;
         return true;
     }
-    private static bool HandleJeShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    private static unsafe bool HandleJeShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
-        sbyte rel8 = *(sbyte*)(address + 1);
-        bool zf = (ctx->EFlags & 0x40) != 0;
-        ulong target = (ulong)((long)ctx->Rip + 2 + rel8);
-        Log($"JE short 0x{target:X} {(zf ? "TAKEN" : "NOT taken")}", 2);
-        ctx->Rip = zf ? target : ctx->Rip + 2;
-        return true;
-    }
-    private static bool HandleJneShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
-    {
-        sbyte rel8 = *(sbyte*)(address + 1);
-        bool zf = (ctx->EFlags & 0x40) != 0;
-        ulong target = (ulong)((long)ctx->Rip + 2 + rel8);
-        Log($"JNE short 0x{target:X} {(zf ? "NOT taken" : "TAKEN")}", 2);
-        ctx->Rip = zf ? ctx->Rip + 2 : target;
-        return true;
-    }
-    private static bool HandleJaShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
-    {
-        // 0x77 rel8  — Jump if Above (unsigned), i.e., CF==0 && ZF==0
-        sbyte rel8 = *(sbyte*)(address + 1);
-        bool cf = (ctx->EFlags & 0x01) != 0;
-        bool zf = (ctx->EFlags & 0x40) != 0;
+        // 74 cb → JE (JZ) short, rel8 signed displacement
+        const int instrLen = 2;
 
-        ulong nextRip = ctx->Rip + 2;
+        sbyte rel8 = *(sbyte*)(address + 1);
+        bool zf = (ctx->EFlags & 0x40) != 0; // ZF bit 6
+
+        ulong nextRip = ctx->Rip + instrLen;
+        ulong target = (ulong)((long)nextRip + rel8);
+
+        Log($"JE short {(zf ? "TAKEN" : "NOT taken")} -> 0x{target:X}", instrLen);
+
+        ctx->Rip = zf ? target : nextRip;
+        return true;
+    }
+    private static unsafe bool HandleJneShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // 75 cb → JNE (JNZ) short, rel8 signed displacement
+        const int instrLen = 2;
+
+        sbyte rel8 = *(sbyte*)(address + 1);
+        bool zf = (ctx->EFlags & 0x40) != 0; // Zero flag
+
+        ulong nextRip = ctx->Rip + instrLen;
+        ulong target = (ulong)((long)nextRip + rel8);
+
+        Log($"JNE short {(zf ? "NOT taken" : "TAKEN")} -> 0x{target:X}", instrLen);
+
+        ctx->Rip = zf ? nextRip : target;
+        return true;
+    }
+    private static unsafe bool HandleJaShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    {
+        // 77 cb → JA (JNBE) short, unsigned jump if CF==0 && ZF==0
+        const int instrLen = 2;
+
+        sbyte rel8 = *(sbyte*)(address + 1);
+        bool cf = (ctx->EFlags & 0x01) != 0; // Carry Flag
+        bool zf = (ctx->EFlags & 0x40) != 0; // Zero Flag
+
+        ulong nextRip = ctx->Rip + instrLen;
         ulong target = (ulong)((long)nextRip + rel8);
         bool taken = !cf && !zf;
 
-        Log($"JA short 0x{target:X} {(taken ? "TAKEN" : "NOT taken")}", 2);
+        Log($"JA short {(taken ? "TAKEN" : "NOT taken")} -> 0x{target:X}", instrLen);
+
         ctx->Rip = taken ? target : nextRip;
         return true;
     }
-    private static bool HandleJbeShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
+    private static unsafe bool HandleJbeShort(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
+        // 76 cb → JBE (JNA) short, unsigned jump if CF==1 || ZF==1
+        const int instrLen = 2;
+
         sbyte rel8 = *(sbyte*)(address + 1);
-        long disp = rel8;
-        ulong target = (ulong)((long)ctx->Rip + 2 + disp);
-        bool cf = (ctx->EFlags & 0x1) != 0;
-        bool zf = (ctx->EFlags & 0x40) != 0;
+        bool cf = (ctx->EFlags & 0x01) != 0;  // Carry Flag
+        bool zf = (ctx->EFlags & 0x40) != 0;  // Zero Flag
+
+        ulong nextRip = ctx->Rip + instrLen;
+        ulong target = (ulong)((long)nextRip + rel8);
         bool taken = cf || zf;
-        Log($"JBE short 0x{target:X} {(taken ? "TAKEN" : "NOT taken")}", 2);
-        ctx->Rip = taken ? target : ctx->Rip + 2;
+
+        Log($"JBE short {(taken ? "TAKEN" : "NOT taken")} -> 0x{target:X}", instrLen);
+
+        ctx->Rip = taken ? target : nextRip;
         return true;
     }
     private static unsafe bool HandleShortConditionalJump(CONTEXT* ctx, byte* ip, Action<string, int> Log)
