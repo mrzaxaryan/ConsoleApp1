@@ -7,167 +7,127 @@ public static unsafe class X64Emulator
     {
         var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
         var before = RegSnapshot.FromContext(ctx);
+
         void Log(string mnemonic, int instrLen)
         {
             string bytes = FormatBytes(address, instrLen);
             string instrAddr = $"0x{before.Rip:X}";
-            //string regs = $"RIP=0x{before.Rip:X} RSP=0x{before.Rsp:X} RAX=0x{before.Rax:X} RCX=0x{before.Rcx:X} RDX=0x{before.Rdx:X} RBP=0x{before.Rbp:X} EFlags=0x{before.EFlags:X}";
             var afterSnap = RegSnapshot.FromContext(ctx);
             string diff = FormatRegisterDiff(before, afterSnap);
-            string currentLog = $"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " =>" + diff : "")}";
-            Console.WriteLine(currentLog);
-            File.AppendAllText("emulator_log.txt", currentLog + Environment.NewLine);
+            string log = $"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}";
+            Console.WriteLine(log);
+            File.AppendAllText("emulator_log.txt", log + Environment.NewLine);
         }
 
+        byte opcode = *address;
         bool result = false;
-        
-        if (*address == 0x0F)
+
+        // --------------------------------
+        // Two-byte opcode prefix (0x0F)
+        // --------------------------------
+        if (opcode == X64Opcodes.TWO_BYTE)
         {
-            byte op = *(address + 1);
-            switch (op)
+            byte op2 = *(address + 1);
+            switch (op2)
             {
-                case 0x85: // JNE rel32
-                    return HandleJneNear(ctx, address, Log);
-
-                case 0x84: // JE rel32
-                    return HandleJeNear(ctx, address, Log);
-
-                case 0xB7: // MOVZX r32/64, r/m16
-                    return HandleMovzxGvEw(ctx, address, Log);
-
-                case 0xB6: // MOVZX r32/64, r/m8
-                    return HandleMovzxR32Rm8(ctx, address, Log);
-                case 0x94: // SETZ / SETE
-                    return HandleSetcc(ctx, address, Log, condition: "ZF");
+                case X64Opcodes.JNE_NEAR: return HandleJneNear(ctx, address, Log);
+                case X64Opcodes.JE_NEAR: return HandleJeNear(ctx, address, Log);
+                case X64Opcodes.MOVZX_GvEw: return HandleMovzxGvEw(ctx, address, Log);
+                case X64Opcodes.MOVZX_R32_RM8: return HandleMovzxR32Rm8(ctx, address, Log);
+                case X64Opcodes.SETE: return HandleSetcc(ctx, address, Log, condition: "ZF");
                 default:
-                    Log($"Unsupported two-byte opcode 0F {op:X2}", 8);
-                    throw new NotImplementedException($"0F {op:X2} not implemented");
+                    Log($"Unsupported two-byte opcode 0F {op2:X2}", 8);
+                    throw new NotImplementedException($"0F {op2:X2} not implemented");
             }
         }
-        else if (*address == 0x48 && *(address + 1) == 0x83 && *(address + 2) == 0xAC && *(address + 3) == 0x24)
-        {
-            result = Sub.Handle(ctx, address, Log);
-        }
-        else if (*address == 0x48 && *(address + 1) == 0x83 && (*(address + 2) & 0x38) == 0x00)
-        {
-            result = HandleAddRm64Imm8(ctx, address, Log);
-        }
-        else if (*address == 0x65)
-        {
-            result = HandleSegmentPrefix(ctx, address, Log);
-        }
-        else if (*address == 0x66)  // operand-size override
-        {
+
+        // --------------------------------
+        // Complex instruction patterns
+        // --------------------------------
+        if (opcode == X64Opcodes.REX_PREFIX && *(address + 1) == 0x83 && *(address + 2) == 0xAC && *(address + 3) == 0x24)
+            return Sub.Handle(ctx, address, Log);
+
+        if (opcode == X64Opcodes.REX_PREFIX && *(address + 1) == 0x83 && (*(address + 2) & 0x38) == 0x00)
+            return HandleAddRm64Imm8(ctx, address, Log);
+
+        if (opcode == X64Opcodes.GS_PREFIX)
+            return HandleSegmentPrefix(ctx, address, Log);
+
+        if (opcode == X64Opcodes.OPSIZE_PREFIX)
             return HandleOperandSizePrefix(ctx, address, Log);
-        }
-        else if (*address >= 0x70 && *address <= 0x7F)
-        {
+
+        // --------------------------------
+        // Conditional short jumps (0x70–0x7F)
+        // --------------------------------
+        if (opcode >= X64Opcodes.JO_SHORT && opcode <= X64Opcodes.JG_SHORT)
             return HandleShortConditionalJump(ctx, address, Log);
-        }
-        else if (*address == 0x03)
+
+        // --------------------------------
+        // Primary opcode dispatch
+        // --------------------------------
+        switch (opcode)
         {
-            return HandleAddGvEv(ctx, address, Log);
+            // Stack operations
+            case X64Opcodes.PUSH_RBP: result = HandlePushRbp(ctx, Log); break;
+            case X64Opcodes.PUSH_RDI: result = HandlePushRdi(ctx, Log); break;
+            case X64Opcodes.PUSH_RSI: result = HandlePushRsi(ctx, Log); break;
+            case X64Opcodes.PUSH_RBX: result = HandlePushRbx(ctx, Log); break;
+
+            case X64Opcodes.POP_RAX:
+            case X64Opcodes.POP_RCX:
+            case X64Opcodes.POP_RDX:
+            case X64Opcodes.POP_RBX:
+            case X64Opcodes.POP_RSP:
+            case X64Opcodes.POP_RBP:
+            case X64Opcodes.POP_RSI:
+            case X64Opcodes.POP_RDI:
+                result = HandlePopReg(ctx, *address, Log);
+                break;
+
+            // MOV family
+            case X64Opcodes.MOV_RM64_R64: result = Mov.HandleMovRm64R64(ctx, address, Log); break;
+            case X64Opcodes.MOV_RM32_IMM32: result = Mov.HandleMovRm32Imm32(ctx, address, Log); break;
+            case X64Opcodes.MOV_R32_RM32: result = HandleMovR32Rm32(ctx, address, Log); break;
+            case X64Opcodes.MOV_RM8_IMM8: result = HandleMovRm8Imm8(ctx, address, Log); break;
+            case >= X64Opcodes.MOV_RAX_IMM64 and <= X64Opcodes.MOV_RDI_IMM64:
+                result = HandleMovImmToReg_NoRex(ctx, address, Log); break;
+
+            // Arithmetic / Logic
+            case X64Opcodes.ADD_R32_RM32: result = HandleAddGvEv(ctx, address, Log); break;
+            case X64Opcodes.XOR_R32_RM32: result = HandleXorRvEv(ctx, address, Log); break;
+            case X64Opcodes.GRP1_EdIb: result = HandleGrp1_EdIb(ctx, address, Log); break;
+            case X64Opcodes.ADD_RM8_R8: result = HandleAddRm8R8(ctx, address, Log); break;
+            case X64Opcodes.TEST_RM8_R8: result = HandleTestRm8R8(ctx, address, Log); break;
+            case X64Opcodes.TEST_RM32_R32: result = HandleTestRm32R32(ctx, address, Log); break;
+            case X64Opcodes.INCDEC_RM8: result = HandleIncDecRm8(ctx, address, Log); break;
+
+            // Control flow
+            case X64Opcodes.CALL: result = HandleCall(ctx, address, Log); break;
+            case X64Opcodes.RET: result = HandleRet(ctx, Log); break;
+            case X64Opcodes.LEAVE: result = HandleLeave(ctx, Log); break;
+            case X64Opcodes.JMP_NEAR: result = HandleJmpNear(ctx, address, Log); break;
+            case X64Opcodes.JMP_SHORT: result = HandleJmpShort(ctx, address, Log); break;
+            case X64Opcodes.JE_SHORT: result = HandleJeShort(ctx, address, Log); break;
+            case X64Opcodes.JNE_SHORT: result = HandleJneShort(ctx, address, Log); break;
+            case X64Opcodes.JBE_SHORT: result = HandleJbeShort(ctx, address, Log); break;
+            case X64Opcodes.JA_SHORT: result = HandleJaShort(ctx, address, Log); break;
+
+            // Misc
+            case X64Opcodes.NOP: result = HandleNop(ctx, Log); break;
+            case X64Opcodes.CMP_AL_IMM8: result = HandleCmpAlImm8(ctx, address, Log); break;
+            case X64Opcodes.REX_PREFIX:
+            case X64Opcodes.REX_B_GROUP:
+            case X64Opcodes.REX_R_GROUP:
+            case X64Opcodes.REX_W_GROUP:
+                result = Rex.Handle(ctx, address, Log); break;
+
+            // Default
+            default:
+                Log($"Unsupported opcode 0x{opcode:X2}", 32);
+                result = false;
+                break;
         }
-        else
-        {
-            switch (*address)
-            {
-                //case 0x85: // TEST r/m32 or r/m64 (with REX.W)
-                //    return HandleTestRmR(ctx, address, operandBitsOverride: 0, Log);
-                case 0x58: // POP RAX
-                case 0x59: // POP RCX
-                case 0x5A: // POP RDX
-                case 0x5B: // POP RBX
-                case 0x5C: // POP RSP
-                case 0x5D: // POP RBP
-                case 0x5E: // POP RSI
-                case 0x5F: // POP RDI
-                    result = HandlePopReg(ctx, *address, Log);
-                    break;
-                case 0x84:
-                    result = HandleTestRm8R8(ctx, address, Log);
-                    break;
-                case 0xB8:
-                case 0xB9:
-                case 0xBA:
-                case 0xBB:
-                case 0xBC:
-                case 0xBD:
-                case 0xBE:
-                case 0xBF:
-                    result = HandleMovImmToReg_NoRex(ctx, address, Log);
-                    break;
-                case X64Opcodes.ADD_RM8_R8:
-                    result = HandleAddRm8R8(ctx, address, Log); break;
-                case X64Opcodes.JBE_SHORT:
-                    result = HandleJbeShort(ctx, address, Log); break;
-                case X64Opcodes.JNE_SHORT:
-                    result = HandleJneShort(ctx, address, Log); break;
-                case X64Opcodes.NOP:
-                    result = HandleNop(ctx, Log); break;
-                case X64Opcodes.PUSH_RBP:
-                    {
-                        //Log("Detected function prologue", 256);
-                        result = HandlePushRbp(ctx, Log); break;
-                    }
-                case 0x4C:
-                case 0x49:               
-                case X64Opcodes.REX_B_GROUP:
-                case X64Opcodes.REX_PREFIX:
-                    result = Rex.Handle(ctx, address, Log); break;
-                case X64Opcodes.PUSH_RDI:
-                    result = HandlePushRdi(ctx, Log); break;
-                case X64Opcodes.PUSH_RSI:
-                    result = HandlePushRsi(ctx, Log); break;
-                case X64Opcodes.PUSH_RBX:
-                    result = HandlePushRbx(ctx, Log); break;
-                case X64Opcodes.MOV_RM64_R64:
-                    result = Mov.HandleMovRm64R64(ctx, address, Log); break;
-                case X64Opcodes.MOV_RM32_IMM32:
-                    result = Mov.HandleMovRm32Imm32(ctx, address, Log); break;
-                case X64Opcodes.CALL:
-                    result = HandleCall(ctx, address, Log); break;
-                case X64Opcodes.RET:
-                    result = HandleRet(ctx, Log); break;
-                case 0xC9: // LEAVE
-                    result = HandleLeave(ctx, Log); break;
-                case 0x8B:
-                    result = HandleMovR32Rm32(ctx, address, Log);
-                    break;
-                // In the Emulate method's switch statement, add this case:
-                case 0x74: // JE rel8
-                    result = HandleJeShort(ctx, address, Log); break;
-                case X64Opcodes.JMP_SHORT:
-                    result = HandleJmpShort(ctx, address, Log); break;
-                case X64Opcodes.CMP_AL_IMM8:
-                    result = HandleCmpAlImm8(ctx, address, Log); break;
-                case 0xC6:
-                    result = HandleMovRm8Imm8(ctx, address, Log);
-                    break;
-                case 0x85:
-                    result = HandleTestRm32R32(ctx, address, Log);
-                    break;
-                case 0x33: 
-                    result = HandleXorRvEv(ctx, address, Log);
-                    break;
-                case 0x77: // JA short (JNBE)
-                    result = HandleJaShort(ctx, address, Log); break;
-                case 0x83:
-                    result = HandleGrp1_EdIb(ctx, address, Log);
-                    break;
-                case 0xFE:
-                    result = HandleIncDecRm8(ctx, address, Log);
-                    break;
-                case 0xE9: // JMP rel32 (near)
-                    result = HandleJmpNear(ctx, address, Log);
-                    break;
-                // ... keep other cases as-is for now ...
-                default:
-                    Log($"Unsupported opcode 0x{*address:X2}", 32);
-                    result = false;
-                    break;
-            }
-        }       
+
         return result;
     }
     private static unsafe bool HandleAddGvEv(CONTEXT* ctx, byte* ip, Action<string, int> Log)
