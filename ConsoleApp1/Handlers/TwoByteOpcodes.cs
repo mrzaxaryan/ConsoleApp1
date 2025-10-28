@@ -18,7 +18,6 @@ public static unsafe class TwoByteOpcodes
             case X64Opcodes.MOVZX_R32_RM8: return HandleMovzxR32Rm8(ctx, address, Log);
             case X64Opcodes.SETE: return HandleSetcc(ctx, address, Log);
             default:
-                Log($"Unhandled two-byte opcode 0F {op2:X2}", 8);
                 return false;
         }
     }
@@ -28,7 +27,7 @@ public static unsafe class TwoByteOpcodes
         int offs = 0;
         byte rex = 0;
         if ((ip[offs] & 0xF0) == 0x40)
-            rex = ip[offs++]; // consume optional REX
+            rex = ip[offs++]; // optional REX
         bool rexB = (rex & 1) != 0;
 
         if (ip[offs] != 0x0F)
@@ -37,42 +36,44 @@ public static unsafe class TwoByteOpcodes
 
         byte opcode = ip[offs++];
         if (opcode < 0x90 || opcode > 0x9F)
-            return false; // not SETcc family
+            return false; // not SETcc
 
         byte modrm = ip[offs++];
-        byte mod = (byte)(modrm >> 6 & 3);
+        byte mod = (byte)((modrm >> 6) & 3);
         int rm = (modrm & 7) | (rexB ? 8 : 0);
         ulong* R = &ctx->Rax;
 
-        // ---- condition evaluation ----
-        bool cf = (ctx->EFlags & 1) != 0;
-        bool pf = (ctx->EFlags & 4) != 0;
-        bool zf = (ctx->EFlags & 0x40) != 0;
-        bool sf = (ctx->EFlags & 0x80) != 0;
-        bool of = (ctx->EFlags & 0x800) != 0;
+        // --- condition evaluation ---
+        uint flags = ctx->EFlags;
+        bool cf = (flags & 1) != 0;
+        bool pf = (flags & 4) != 0;
+        bool zf = (flags & 0x40) != 0;
+        bool sf = (flags & 0x80) != 0;
+        bool of = (flags & 0x800) != 0;
 
         bool cond = opcode switch
         {
-            0x90 => of,               // SETO
-            0x91 => !of,              // SETNO
-            0x92 => cf,               // SETB / SETC
-            0x93 => !cf,              // SETNB / SETNC
-            0x94 => zf,               // SETZ / SETE
-            0x95 => !zf,              // SETNZ / SETNE
-            0x96 => (cf || zf),       // SETBE
-            0x97 => (!cf && !zf),     // SETA
-            0x98 => sf,               // SETS
-            0x99 => !sf,              // SETNS
-            0x9A => pf,               // SETP
-            0x9B => !pf,              // SETNP
-            0x9C => (sf != of),       // SETL
-            0x9D => (sf == of),       // SETGE
-            0x9E => (zf || (sf != of)), // SETLE
-            0x9F => (!zf && (sf == of)), // SETG
+            0x90 => of,                       // SETO
+            0x91 => !of,                      // SETNO
+            0x92 => cf,                       // SETB/SETC
+            0x93 => !cf,                      // SETNB/SETNC
+            0x94 => zf,                       // SETE/SETZ
+            0x95 => !zf,                      // SETNE/SETNZ
+            0x96 => cf || zf,                 // SETBE
+            0x97 => !cf && !zf,               // SETA
+            0x98 => sf,                       // SETS
+            0x99 => !sf,                      // SETNS
+            0x9A => pf,                       // SETP
+            0x9B => !pf,                      // SETNP
+            0x9C => sf != of,                 // SETL
+            0x9D => sf == of,                 // SETGE
+            0x9E => zf || (sf != of),         // SETLE
+            0x9F => !zf && (sf == of),        // SETG
             _ => false
         };
 
         byte result = cond ? (byte)1 : (byte)0;
+
         string mnemonic = opcode switch
         {
             0x90 => "SETO",
@@ -94,25 +95,27 @@ public static unsafe class TwoByteOpcodes
             _ => "SET?"
         };
 
-        // ---- destination decode ----
+        // --- destination decode ---
         if (mod == 0b11)
         {
-            byte* dst8 = (byte*)(R + rm);
-            *dst8 = result;
+            // register destination
+            byte* regPtr = (byte*)(R + rm);
+            *regPtr = result;
             Log($"{mnemonic} R{rm}b => {result}", offs);
             ctx->Rip += (ulong)offs;
             return true;
         }
         else
         {
-            // memory form (safe)
+            // memory destination
             ulong memAddr = 0;
             if (mod == 0b00 && (modrm & 7) == 0b101)
             {
+                // RIP-relative disp32
                 int disp32 = *(int*)(ip + offs);
                 offs += 4;
                 ulong nextRip = ctx->Rip + (ulong)offs;
-                memAddr = nextRip + (ulong)(long)disp32; // RIP-relative
+                memAddr = nextRip + (ulong)(long)disp32;
             }
             else
             {
@@ -127,7 +130,7 @@ public static unsafe class TwoByteOpcodes
                 }
             }
 
-            // safety guard: don’t crash on invalid address
+            // guard against null/small addresses
             if (memAddr < 0x10000)
             {
                 Log($"{mnemonic} invalid [0x{memAddr:X}] skipped", offs);
@@ -141,6 +144,7 @@ public static unsafe class TwoByteOpcodes
             return true;
         }
     }
+
     private static unsafe bool HandleMovzxR32Rm8(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
         // [REX?] 0F B6 /r  → MOVZX r32/64, r/m8

@@ -19,9 +19,81 @@ public static unsafe class ControlFlow
             case X64Opcodes.JA_SHORT: return HandleJaShort(ctx, address, Log);
             case >= X64Opcodes.JO_SHORT and <= X64Opcodes.JG_SHORT:
                 return HandleShortConditionalJump(ctx, address, Log);
+            case 0x0F:
+                // Only the 0F 80–8F range are near conditional jumps.
+                {
+                    byte op2 = *(address + 1);
+                    if (op2 >= 0x80 && op2 <= 0x8F)
+                        return HandleTwoByteConditionalJump(ctx, address, Log);
+                    // ---- MOVZX variants ----
+                    if (op2 == 0xB6)
+                        return HandleMovzxGvEb32(ctx, address, Log);   // MOVZX r32, r/m8
+                    if (op2 == 0xB7)
+                        return HandleMovzxGvEw32(ctx, address, Log);   // MOVZX r32, r/m16
+                    return false; // let other modules handle e.g. 0F B6/B7 (MOVZX), etc.                    
+
+                }
             default:
                 return false;
         }
+    }
+    private static unsafe bool HandleMovzxGvEw32(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        // 0F B7 /r  → MOVZX r32, r/m16
+        int offs = 2; // skip 0F B7
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = (modrm >> 3) & 7; // destination r32
+        int rm = modrm & 7;        // source r/m16
+
+        ulong* R = &ctx->Rax;
+        ushort src;
+        string srcDesc;
+
+        if (mod == 0b11)
+        {
+            src = (ushort)(R[rm] & 0xFFFF);
+            srcDesc = $"R{rm}w";
+        }
+        else
+        {
+            ulong addr = Miscellaneous.ResolveEA_NoRex_BaseDispOrRip(ctx, ip, ref offs, mod, rm, out srcDesc);
+            src = *(ushort*)addr;
+        }
+
+        R[reg] = (R[reg] & ~0xFFFFFFFFUL) | src; // zero-extend 16→32
+        Log($"MOVZX R{reg}d, {srcDesc} => 0x{src:X4}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+    private static unsafe bool HandleMovzxGvEb32(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        // 0F B6 /r  → MOVZX r32, r/m8
+        int offs = 2; // skip 0F B6
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = (modrm >> 3) & 7; // destination
+        int rm = modrm & 7;        // source
+
+        ulong* R = &ctx->Rax;
+        byte src;
+        string srcDesc;
+
+        if (mod == 0b11)
+        {
+            src = (byte)R[rm];
+            srcDesc = $"R{rm}b";
+        }
+        else
+        {
+            ulong addr = Miscellaneous.ResolveEA_NoRex_BaseDispOrRip(ctx, ip, ref offs, mod, rm, out srcDesc);
+            src = *(byte*)addr;
+        }
+
+        R[reg] = (R[reg] & ~0xFFFFFFFFUL) | src;
+        Log($"MOVZX R{reg}d, {srcDesc} => 0x{src:X2}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
     }
     private static unsafe bool HandleCall(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
@@ -223,4 +295,51 @@ public static unsafe class ControlFlow
 
         return true;
     }
+    private static unsafe bool HandleTwoByteConditionalJump(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        // Opcode form: 0F 8x + rel32
+        byte sub = *(ip + 1);
+        int disp32 = *(int*)(ip + 2);
+        ulong target = ctx->Rip + 6 + (ulong)disp32; // 6-byte total length
+        uint f = ctx->EFlags;
+        bool take;
+
+        switch (sub)
+        {
+            case 0x80: take = (f & 0x800) != 0; break;                        // JO
+            case 0x81: take = (f & 0x800) == 0; break;                        // JNO
+            case 0x82: take = ((f & 1) != 0) || ((f & 0x40) != 0); break;     // JBE/JNA
+            case 0x83: take = ((f & 1) == 0) && ((f & 0x40) == 0); break;     // JA/JNBE
+            case 0x84: take = (f & 0x40) != 0; break;                         // JE/JZ
+            case 0x85: take = (f & 0x40) == 0; break;                         // JNE/JNZ
+            case 0x86: take = ((f >> 2) & 1) != 0; break;                     // JBE(PF) rarely used (JP)
+            case 0x87: take = ((f >> 2) & 1) == 0; break;                     // JNP
+            case 0x88: take = (f & 0x80) != 0; break;                         // JS
+            case 0x89: take = (f & 0x80) == 0; break;                         // JNS
+            case 0x8A: take = ((f >> 11) ^ ((f >> 7) & 1)) != 0; break;       // JP
+            case 0x8B: take = ((f >> 11) ^ ((f >> 7) & 1)) == 0; break;       // JNP
+            case 0x8C: take = (((f >> 7) & 1) != ((f >> 11) & 1)); break;     // JL
+            case 0x8D: take = (((f >> 7) & 1) == ((f >> 11) & 1)); break;     // JGE
+            case 0x8E: take = ((f & 0x40) != 0) || (((f >> 7) & 1) != ((f >> 11) & 1)); break; // JLE
+            case 0x8F: take = ((f & 0x40) == 0) && (((f >> 7) & 1) == ((f >> 11) & 1)); break; // JG
+            default:
+                Log($"Unsupported two-byte Jcc 0F {sub:X2}", 6);
+                return false;
+        }
+
+        if (take)
+        {
+            Log($"Jcc near taken -> 0x{target:X}", 6);
+            ctx->Rip = target;
+        }
+        else
+        {
+            Log($"Jcc near NOT taken -> 0x{target:X}", 6);
+            ctx->Rip += 6;
+        }
+
+        return true;
+    }
+
+
 }

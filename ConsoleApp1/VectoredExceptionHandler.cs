@@ -78,7 +78,7 @@ public static unsafe class VectoredExceptionHandler
         }
         else
         {
-            Console.WriteLine($"[VEH] Received exception code RIP 0x{rip:X} 0x{code:X}, not handled, continuing search.");
+            //Console.WriteLine($"[VEH] Received exception code RIP 0x{rip:X} 0x{code:X}, not handled, continuing search.");
         }
 
         return EXCEPTION_CONTINUE_SEARCH;

@@ -22,32 +22,336 @@ internal static class Rex
         if (HandleMovRbpRsp_4889E5(ctx, address, Log, op2, op3)) return true;
         if (HandleSubRspImm8_4883EC(ctx, address, Log, op2, op3)) return true;
 
-        // 3) grouped / common patterns
-        if (HandleGrp1_81(ctx, address, Log, W, R, X, B, op2)) return true;          // 48 81 /r imm32 (sext)
-        if (HandleMovImm_C7(ctx, address, Log, W, X, B, op2)) return true;           // 48 C7 /0 imm32 (sext)
-        if (HandleAndRspImm8_4883E4(ctx, address, Log, op2, op3)) return true;       // 48 83 E4 ib
-        if (HandleSubRspImm32_4881EC(ctx, address, Log, op2, op3)) return true;      // 48 81 EC id
-        if (HandleMovRaxFromRsp_488B0424(ctx, address, Log, op2, op3)) return true;  // 48 8B 04 24
+        // 3) grouped/common patterns
+        if (HandleGrp1_81(ctx, address, Log, W, R, X, B, op2)) return true;
+        if (HandleGrp2_Shift_C1(ctx, address, Log, W, R, X, B)) return true;   // 48 C1 /r ib
+        if (HandleMovImm_C7(ctx, address, Log, W, X, B, op2)) return true;
+        if (HandleAndRspImm8_4883E4(ctx, address, Log, op2, op3)) return true;
+        if (HandleSubRspImm32_4881EC(ctx, address, Log, op2, op3)) return true;
+        if (HandleMovRaxFromRsp_488B0424(ctx, address, Log, op2, op3)) return true;
 
-        if (HandleMov_89(ctx, address, Log, W, R, X, B, op2)) return true;           // 48 89 /r
-        if (HandleGrp1_83(ctx, address, Log, W, R, X, B, op2)) return true;          // 48 83 /r ib (sext)
-        if (HandleMov_8B(ctx, address, Log, W, R, X, B, op2)) return true;           // 48 8B /r (load)
-        if (HandleLea_Rdx_Rip_488D15(ctx, address, Log, op2, op3)) return true;      // 48 8D 15 rel32 (RDX)
-        if (HandleSub_29(ctx, address, Log, W, R, X, B, op2)) return true;           // 48 29 /r
-        if (HandleLea_8D(ctx, address, Log, W, R, X, B, op2)) return true;           // 48 8D /r
-        if (HandleAdd_01(ctx, address, Log, W, R, X, B, op2)) return true;           // 48 01 /r
-        if (HandleMovRegImm_B8toBF(ctx, address, Log, rex, B, op2)) return true;     // 4x B8..BF
-        if (HandleAddRaxImm_4805(ctx, address, Log, W, op2)) return true;            // 48 05 id
-        if (HandleFF_Group(ctx, address, Log, R, X, B, op2)) return true;            // 48 FF /r (inc/dec/call/jmp/push)
+        if (HandleMov_89_Rex32(ctx, address, Log, W, R, X, B)) return true; // 41 89 /r
+        if (HandleMov_89(ctx, address, Log, W, R, X, B, op2)) return true;
+        if (HandleGrp1_83(ctx, address, Log, W, R, X, B, op2)) return true;
+        if (HandleMov_8B(ctx, address, Log, W, R, X, B, op2)) return true;
+        if (HandleLea_Rdx_Rip_488D15(ctx, address, Log, op2, op3)) return true;
+        if (HandleSub_29(ctx, address, Log, W, R, X, B, op2)) return true;
+        if (HandleLea_8D(ctx, address, Log, W, R, X, B, op2)) return true;
+        if (HandleAdd_01(ctx, address, Log, W, R, X, B, op2)) return true;
+        if (HandleMovRegImm_B8toBF(ctx, address, Log, rex, B, op2)) return true;
+        if (HandleAddRaxImm_4805(ctx, address, Log, W, op2)) return true;
+        if (HandleFF_Group(ctx, address, Log, R, X, B, op2)) return true;
 
-        if (HandleTest_85(ctx, address, Log, W, R, X, B, op2)) return true;          // 48 85 /r
-        if (HandleMovsxd_63(ctx, address, Log, op2)) return true;                    // 4x 63 /r
-        if (op2 == 0x3B) return HandleCmpGvEv64(ctx, address, Log);                  // 48 3B /r
-        if (op2 == 0x31) return HandleXorEvGv(ctx, address, Log);                    // 4x 31 /r
+        if (HandleTest_85(ctx, address, Log, W, R, X, B, op2)) return true;
+        if (HandleMovsxd_63(ctx, address, Log, op2)) return true;
 
+        // ===========================
+        // New dedicated handlers
+        // ===========================
+        if (HandleCdqe_4898(ctx, address, Log, W, op2)) return true; // 48 98
+        if (HandleCqo_4899(ctx, address, Log, W, op2)) return true;  // 48 99
+        if (HandleCmpEvGv_4839(ctx, address, Log, R, X, B, op2)) return true; // 48 39 /r
+        if (HandleCmpGvEv_483B(ctx, address, Log, R, X, B, op2)) return true; // 48 3B /r
+
+        if (op2 == 0x31) return HandleXorEvGv(ctx, address, Log);
+
+        // fallback
         Log($"Unsupported REX-prefixed opcode 0x{rex:X2} 0x{op2:X2} 0x{op3:X2}", 3);
         return false;
     }
+    private static unsafe bool HandleMov_89_Rex32(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool W, bool R, bool X, bool B)
+    {
+        if (ip[1] != 0x89) return false; // not MOV r/m32,r32
+        if (W) return false;              // 48 89 handled elsewhere (64-bit)
+
+        int offs = 2;                     // skip REX + opcode
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int reg = ((modrm >> 3) & 7) | (R ? 8 : 0); // source
+        int rm = (modrm & 7) | (B ? 8 : 0);        // dest
+
+        ulong* R64 = &ctx->Rax;
+        uint value = (uint)(R64[reg] & 0xFFFFFFFF);
+        string dstDesc;
+
+        if (mod == 0b11)
+        {
+            R64[rm] = (R64[rm] & ~0xFFFFFFFFUL) | value;
+            dstDesc = $"R{rm}d";
+        }
+        else
+        {
+            // memory form (rare in this pattern)
+            ulong addr = ResolveEA_Rex(ctx, ip, ref offs, mod, rm, X, B, out dstDesc);
+            *(uint*)addr = value;
+        }
+
+        Log($"MOV {dstDesc}, R{reg}d => 0x{value:X8}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+    private static unsafe ulong ResolveEA_Rex(
+        CONTEXT* ctx, byte* ip, ref int offs,
+        byte mod, int rm, bool X, bool B,
+        out string desc)
+    {
+        int rmLow = rm & 7;
+        ulong ea = 0;         // final effective address
+        desc = string.Empty;
+
+        // -------- [1] SIB byte present (rmLow == 100b) --------
+        if (rmLow == 0b100)
+        {
+            byte sib = ip[offs++];
+            int scaleBits = sib >> 6;
+            int scale = 1 << scaleBits;
+            int indexLow = (sib >> 3) & 7;
+            int baseLow = sib & 7;
+
+            int indexReg = indexLow | (X ? 8 : 0);
+            int baseReg = baseLow | (B ? 8 : 0);
+
+            bool noIndex = (indexLow == 0b100) && !X; // 100b = no index unless REX.X set
+            ulong indexVal = noIndex ? 0UL : GetReg64ByIndex(ctx, indexReg);
+            string indexText = noIndex ? "" : $"+R{indexReg}*{scale}";
+
+            // disp32-only, no base (mod=00, base=101, !B)
+            if (baseLow == 0b101 && mod == 0b00 && !B)
+            {
+                int disp32 = *(int*)(ip + offs);
+                offs += 4;
+                ea = (ulong)(long)disp32 + (ulong)indexVal * (ulong)scale;
+                desc = $"[{(noIndex ? "" : $"R{indexReg}*{scale}")}+0x{disp32:X}]";
+                return ea;
+            }
+
+            ulong baseRegVal = GetReg64ByIndex(ctx, baseReg);
+
+            if (mod == 0b01)
+            {
+                sbyte disp8 = *(sbyte*)(ip + offs);
+                offs += 1;
+                ea = baseRegVal + (ulong)disp8 + (ulong)indexVal * (ulong)scale;
+                desc = $"[R{baseReg}{(disp8 >= 0 ? "+" : "")}{disp8}{indexText}]";
+            }
+            else if (mod == 0b10)
+            {
+                int disp32 = *(int*)(ip + offs);
+                offs += 4;
+                ea = baseRegVal + (ulong)disp32 + (ulong)indexVal * (ulong)scale;
+                desc = $"[R{baseReg}+0x{disp32:X}{indexText}]";
+            }
+            else
+            {
+                ea = baseRegVal + (ulong)indexVal * (ulong)scale;
+                desc = $"[R{baseReg}{indexText}]";
+            }
+
+            return ea;
+        }
+
+        // -------- [2] RIP-relative (mod=00, rm=101, no B) --------
+        if (mod == 0b00 && rmLow == 0b101 && !B)
+        {
+            int disp32 = *(int*)(ip + offs);
+            offs += 4;
+            ea = ctx->Rip + (ulong)offs + (ulong)(long)disp32;
+            desc = $"[RIP+0x{disp32:X}]";
+            return ea;
+        }
+
+        // -------- [3] Simple base + displacement --------
+        ulong baseVal = GetReg64ByIndex(ctx, rm);
+
+        if (mod == 0b01)
+        {
+            sbyte disp8 = *(sbyte*)(ip + offs);
+            offs += 1;
+            ea = baseVal + (ulong)disp8;
+            desc = $"[R{rm}{(disp8 >= 0 ? "+" : "")}{disp8}]";
+        }
+        else if (mod == 0b10)
+        {
+            int disp32 = *(int*)(ip + offs);
+            offs += 4;
+            ea = baseVal + (ulong)(long)disp32;
+            desc = $"[R{rm}+0x{disp32:X}]";
+        }
+        else
+        {
+            ea = baseVal;
+            desc = $"[R{rm}]";
+        }
+
+        return ea;
+    }
+
+
+    private static unsafe bool HandleCdqe_4898(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool W, byte op2)
+    {
+        if (op2 != 0x98) return false;
+        if (!W) return false; // only valid with REX.W
+
+        // CDQE: RAX ← sign-extend(EAX)
+        uint eax = (uint)(ctx->Rax & 0xFFFFFFFF);
+        ctx->Rax = (ulong)(long)(int)eax;
+
+        Log("CDQE", 2);
+        ctx->Rip += 2;
+        return true;
+    }
+
+    private static unsafe bool HandleCqo_4899(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool W, byte op2)
+    {
+        if (op2 != 0x99) return false;
+        if (!W) return false; // only valid with REX.W
+
+        // CQO: RDX:RAX ← signext(RAX)
+        long rax = (long)ctx->Rax;
+        ctx->Rdx = (ulong)(rax < 0 ? -1L : 0L);
+
+        Log("CQO", 2);
+        ctx->Rip += 2;
+        return true;
+    }
+
+    private static unsafe bool HandleCmpEvGv_4839(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool R, bool X, bool B, byte op2)
+    {
+        if (op2 != 0x39) return false;
+        return HandleCmpEvGv64(ctx, ip, Log, R, X, B);
+    }
+    private static unsafe bool HandleCmpEvGv64(
+    CONTEXT* ctx,
+    byte* ip,
+    Action<string, int> Log,
+    bool R,
+    bool X,
+    bool B)
+    {
+        // 48 39 /r → CMP r/m64, r64 (Ev,Gv)
+        int offs = 2; // skip REX + opcode
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 0x3);
+        int reg = ((modrm >> 3) & 0x7) | (R ? 8 : 0); // Gv (source)
+        int rm = (modrm & 0x7) | (B ? 8 : 0);        // Ev (destination)
+
+        ulong right = GetReg64ByIndex(ctx, reg); // Gv
+        string rightDesc = $"R{reg}";
+
+        ulong left;
+        string leftDesc;
+
+        if (mod == 0b11)
+        {
+            // Register–register form
+            left = GetReg64ByIndex(ctx, rm);
+            leftDesc = $"R{rm}";
+        }
+        else
+        {
+            // Memory form
+            ulong addr = ResolveEA64(ctx, ip, ref offs, mod, rm, R, X, B, out leftDesc);
+            left = *(ulong*)addr;
+        }
+
+        ulong result = left - right;
+        ctx->EFlags = UpdateFlags_Sub64(ctx->EFlags, left, right, result);
+
+        Log($"CMP {leftDesc}, {rightDesc} => result=0x{result:X16}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+    private static unsafe ulong ResolveEA64(
+    CONTEXT* ctx,
+    byte* ip,
+    ref int offs,
+    byte mod,
+    int rm,
+    bool R,
+    bool X,
+    bool B,
+    out string desc)
+    {
+        int rmLow = rm & 7;
+
+        if (mod == 0b00 && rmLow == 0b101 && !B)
+        {
+            // RIP + disp32
+            int disp32 = *(int*)(ip + offs);
+            offs += 4;
+            ulong addr = ctx->Rip + (ulong)offs + (ulong)disp32;
+            desc = $"[RIP+0x{disp32:X}]";
+            return addr;
+        }
+
+        // Base register
+        ulong baseVal = GetReg64ByIndex(ctx, rm);
+        if (mod == 0b01)
+        {
+            sbyte d8 = *(sbyte*)(ip + offs);
+            offs += 1;
+            desc = $"[R{rm}{(d8 >= 0 ? "+" : "")}{d8}]";
+            return baseVal + (ulong)d8;
+        }
+        else if (mod == 0b10)
+        {
+            int d32 = *(int*)(ip + offs);
+            offs += 4;
+            desc = $"[R{rm}+0x{d32:X}]";
+            return baseVal + (ulong)d32;
+        }
+
+        desc = $"[R{rm}]";
+        return baseVal;
+    }
+    private static unsafe ulong GetReg64ByIndex(CONTEXT* c, int idx)
+    {
+        switch (idx & 15)
+        {
+            case 0: return c->Rax;
+            case 1: return c->Rcx;
+            case 2: return c->Rdx;
+            case 3: return c->Rbx;
+            case 4: return c->Rsp;
+            case 5: return c->Rbp;
+            case 6: return c->Rsi;
+            case 7: return c->Rdi;
+            case 8: return c->R8;
+            case 9: return c->R9;
+            case 10: return c->R10;
+            case 11: return c->R11;
+            case 12: return c->R12;
+            case 13: return c->R13;
+            case 14: return c->R14;
+            case 15: return c->R15;
+            default: return 0;
+        }
+    }
+    private static uint UpdateFlags_Sub64(uint oldFlags, ulong a, ulong b, ulong r)
+    {
+        uint f = oldFlags & ~0x8D5u; // clear OF,SF,ZF,AF,PF,CF
+
+        if (b > a) f |= 0x1;                        // CF
+        if (r == 0) f |= 1u << 6;                   // ZF
+        if ((r & (1UL << 63)) != 0) f |= 1u << 7;   // SF
+        if ((((a ^ b) & (a ^ r)) & (1UL << 63)) != 0) f |= 1u << 11; // OF
+        if ((((a ^ b) ^ r) & 0x10UL) != 0) f |= 1u << 4;             // AF
+
+        // PF (even parity of low byte)
+        byte low = (byte)r;
+        low ^= (byte)(low >> 4);
+        low &= 0xF;
+        if (((0x6996 >> low) & 1) != 0) f |= 1u << 2;
+
+        return f;
+    }
+
+    private static unsafe bool HandleCmpGvEv_483B(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool R, bool X, bool B, byte op2)
+    {
+        if (op2 != 0x3B) return false;
+        return HandleCmpGvEv64(ctx, ip, Log);
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Tiny helpers
     // ─────────────────────────────────────────────────────────────────────
@@ -339,6 +643,47 @@ internal static class Rex
         Log($"Unsupported 48 81 /{grp} form", offs);
         return false;
     }
+    private static unsafe bool HandleGrp2_Shift_C1(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool W, bool R, bool X, bool B)
+    {
+        if (ip[1] != 0xC1) return false;      // not group-2 imm8
+        int offs = 2;                         // skip REX + 0xC1
+        byte modrm = ip[offs++];
+        byte mod = (byte)((modrm >> 6) & 3);
+        int sub = (modrm >> 3) & 7;          // /n selector
+        int rm = (modrm & 7) | (B ? 8 : 0);
+        byte imm8 = ip[offs++];
+
+        ulong* R64 = &ctx->Rax;
+        string opName;
+        ulong value = 0, result = 0;
+
+        if (mod != 0b11)
+        {
+            // Only register form needed for compiler output; bail otherwise
+            Log($"Unsupported 48 C1 (mod != 11)", offs);
+            return false;
+        }
+
+        value = R64[rm];
+
+        switch (sub)
+        {
+            case 0: opName = "ROL"; result = (value << imm8) | (value >> (64 - imm8)); break;
+            case 1: opName = "ROR"; result = (value >> imm8) | (value << (64 - imm8)); break;
+            case 4: opName = "SHL"; result = value << imm8; break;
+            case 5: opName = "SHR"; result = value >> imm8; break;
+            case 7: opName = "SAR"; result = (ulong)((long)value >> imm8); break;
+            default:
+                Log($"Unsupported 48 C1 / {sub}", offs);
+                return false;
+        }
+
+        R64[rm] = result;
+        Log($"{opName} R{rm}, {imm8} => 0x{value:X} → 0x{result:X}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
 
     // ─────────────────────────────────────────────────────────────────────
     // 48 C7 /0 imm32 (sext) => MOV r/m64, imm32
@@ -508,7 +853,7 @@ internal static class Rex
             }
         }
         return false;
-    }
+    }    
 
     // 48 89 /r  => MOV r/m64, r64
     private static unsafe bool HandleMov_89(CONTEXT* ctx, byte* address, Action<string, int> Log, bool W, bool R, bool X, bool B, byte op2)
