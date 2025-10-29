@@ -1,5 +1,5 @@
 ﻿using System;
-using static ConsoleApp1.X64Emulator;
+using static ConsoleApp1.RWXless;
 
 namespace ConsoleApp1.Handlers;
 

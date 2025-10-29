@@ -5,7 +5,7 @@ using ConsoleApp1.Handlers;
 
 namespace ConsoleApp1;
 
-public static unsafe class X64Emulator
+public static unsafe class RWXless
 {
     public static bool Emulate(ref EXCEPTION_POINTERS exceptionInfo, byte* address)
     {
@@ -20,7 +20,7 @@ public static unsafe class X64Emulator
             string diff = FormatRegisterDiff(before, afterSnap);
             string log = $"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}";
             Console.WriteLine(log);
-            File.AppendAllText("emulator_log.txt", log + Environment.NewLine);
+            //File.AppendAllText("emulator_log.txt", log + Environment.NewLine);
         }
 
         byte opcode = *address;
