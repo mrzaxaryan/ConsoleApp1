@@ -39,12 +39,12 @@ public static unsafe class ControlFlow
     }
     private static unsafe bool HandleMovzxGvEw32(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
-        // 0F B7 /r  → MOVZX r32, r/m16
-        int offs = 2; // skip 0F B7
+        // 0F B7 /r → MOVZX r32, r/m16
+        int offs = 2;
         byte modrm = ip[offs++];
         byte mod = (byte)((modrm >> 6) & 3);
-        int reg = (modrm >> 3) & 7; // destination r32
-        int rm = modrm & 7;        // source r/m16
+        int reg = (modrm >> 3) & 7;
+        int rm = modrm & 7;
 
         ulong* R = &ctx->Rax;
         ushort src;
@@ -52,7 +52,7 @@ public static unsafe class ControlFlow
 
         if (mod == 0b11)
         {
-            src = (ushort)(R[rm] & 0xFFFF);
+            src = (ushort)R[rm];          // take low 16 of the source reg
             srcDesc = $"R{rm}w";
         }
         else
@@ -61,19 +61,22 @@ public static unsafe class ControlFlow
             src = *(ushort*)addr;
         }
 
-        R[reg] = (R[reg] & ~0xFFFFFFFFUL) | src; // zero-extend 16→32
+        // CRITICAL: zero upper 32 on r32 writes
+        R[reg] = (uint)src;
+
         Log($"MOVZX R{reg}d, {srcDesc} => 0x{src:X4}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
+
     private static unsafe bool HandleMovzxGvEb32(CONTEXT* ctx, byte* ip, Action<string, int> Log)
     {
-        // 0F B6 /r  → MOVZX r32, r/m8
+        // 0F B6 /r → MOVZX r32, r/m8
         int offs = 2; // skip 0F B6
         byte modrm = ip[offs++];
         byte mod = (byte)((modrm >> 6) & 3);
         int reg = (modrm >> 3) & 7; // destination
-        int rm = modrm & 7;        // source
+        int rm = modrm & 7;         // source
 
         ulong* R = &ctx->Rax;
         byte src;
@@ -90,11 +93,15 @@ public static unsafe class ControlFlow
             src = *(byte*)addr;
         }
 
-        R[reg] = (R[reg] & ~0xFFFFFFFFUL) | src;
+        // ✅ Zero-extend to 64-bit register correctly
+        R[reg] = (uint)src;
+
         Log($"MOVZX R{reg}d, {srcDesc} => 0x{src:X2}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
+
+
     private static unsafe bool HandleCall(CONTEXT* ctx, byte* address, Action<string, int> Log)
     {
         // E8 rel32 → CALL near relative

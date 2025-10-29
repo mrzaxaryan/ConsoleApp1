@@ -20,7 +20,7 @@ public static unsafe class X64Emulator
             string diff = FormatRegisterDiff(before, afterSnap);
             string log = $"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}";
             Console.WriteLine(log);
-            //File.AppendAllText("emulator_log.txt", log + Environment.NewLine);
+            File.AppendAllText("emulator_log.txt", log + Environment.NewLine);
         }
 
         byte opcode = *address;

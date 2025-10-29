@@ -61,27 +61,29 @@ internal static class Rex
     }
     private static unsafe bool HandleMov_89_Rex32(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool W, bool R, bool X, bool B)
     {
-        if (ip[1] != 0x89) return false; // not MOV r/m32,r32
-        if (W) return false;              // 48 89 handled elsewhere (64-bit)
+        // MOV r/m32, r32 (with REX prefix but not REX.W)
+        if (ip[1] != 0x89) return false;
+        if (W) return false; // 48 89 handled elsewhere (64-bit)
 
-        int offs = 2;                     // skip REX + opcode
+        int offs = 2; // skip REX + opcode
         byte modrm = ip[offs++];
         byte mod = (byte)((modrm >> 6) & 3);
         int reg = ((modrm >> 3) & 7) | (R ? 8 : 0); // source
-        int rm = (modrm & 7) | (B ? 8 : 0);        // dest
+        int rm = (modrm & 7) | (B ? 8 : 0);        // destination
 
         ulong* R64 = &ctx->Rax;
-        uint value = (uint)(R64[reg] & 0xFFFFFFFF);
+        uint value = (uint)R64[reg]; // 32-bit value, implicitly zero-extended
         string dstDesc;
 
         if (mod == 0b11)
         {
-            R64[rm] = (R64[rm] & ~0xFFFFFFFFUL) | value;
+            // ✅ Fix: zero-extend properly, don’t preserve upper 32 bits
+            R64[rm] = value;
             dstDesc = $"R{rm}d";
         }
         else
         {
-            // memory form (rare in this pattern)
+            // memory write: only 32 bits written to memory (no zero-extension rules)
             ulong addr = ResolveEA_Rex(ctx, ip, ref offs, mod, rm, X, B, out dstDesc);
             *(uint*)addr = value;
         }
@@ -90,6 +92,7 @@ internal static class Rex
         ctx->Rip += (ulong)offs;
         return true;
     }
+
     private static unsafe ulong ResolveEA_Rex(
         CONTEXT* ctx, byte* ip, ref int offs,
         byte mod, int rm, bool X, bool B,

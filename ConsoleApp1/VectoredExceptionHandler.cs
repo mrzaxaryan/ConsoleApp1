@@ -64,7 +64,6 @@ public static unsafe class VectoredExceptionHandler
                 }
                 else
                 {
-                    //ClearHWBP(ref exceptionInfo);
                     SetHWBP(ref exceptionInfo, (void*)*(ulong*)ctx->Rsp);
                 }
 
