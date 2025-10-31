@@ -16,4 +16,13 @@
     </None>
   </ItemGroup>
 
+	<Target Name="PostBuild" AfterTargets="Build">
+		<ItemGroup>
+			<BinFiles Include="..\samples\*.bin" />
+		</ItemGroup>
+		<Copy SourceFiles="@(BinFiles)"
+			  DestinationFolder="$(OutDir)"
+			  SkipUnchangedFiles="true" />
+	</Target>
+
 </Project>
