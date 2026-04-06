@@ -6,6 +6,7 @@
 ![x86_64](https://img.shields.io/badge/x86__64-red?style=for-the-badge)
 ![Security Research](https://img.shields.io/badge/Security-Research-critical?style=for-the-badge)
 ![Proof of Concept](https://img.shields.io/badge/Proof%20of-Concept-blueviolet?style=for-the-badge)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 
 [GitHub Project](https://github.com/mrzaxaryan/NoRWX)
 
