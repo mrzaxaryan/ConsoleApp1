@@ -14,6 +14,7 @@ public static unsafe class VectoredExceptionHandler
     private static nuint executingCodeSize = nuint.Zero;
     private static bool isArm64Emulated = false;
     private static bool is32BitMode = false;
+    private static bool isArm64CodeMode = false;
     private static ExceptionHandlerDelegate? handlerDelegate;
     private static GCHandle handlerDelegateHandle;
 
@@ -77,7 +78,9 @@ public static unsafe class VectoredExceptionHandler
     {
         uint code = *(uint*)exceptionInfo.ExceptionRecord;
 
-        if (is32BitMode)
+        if (isArm64CodeMode)
+            return ExceptionHandlerARM64(ref exceptionInfo, code);
+        else if (is32BitMode)
             return ExceptionHandler32(ref exceptionInfo, code);
         else
             return ExceptionHandler64(ref exceptionInfo, code);
@@ -149,6 +152,66 @@ public static unsafe class VectoredExceptionHandler
         }
 
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    private static uint ExceptionHandlerARM64(ref EXCEPTION_POINTERS exceptionInfo, uint code)
+    {
+        // ARM64 code emulation uses the x64 CONTEXT (since we run from a 64-bit host process)
+        // We translate the register state to/from CONTEXT_ARM64
+        var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
+        ulong rip = ctx->Rip;
+
+        bool isOurException = code == EXCEPTION_SINGLE_STEP
+            || (isArm64Emulated && code == EXCEPTION_ACCESS_VIOLATION);
+
+        if (isOurException && IsInCodeRegion(rip))
+        {
+            // Map x64 CONTEXT registers to ARM64 CONTEXT
+            var arm = new EmulatorARM64.CONTEXT_ARM64();
+            arm.Pc = ctx->Rip;
+            arm.Sp = ctx->Rsp;
+            arm.X[0] = ctx->Rax; arm.X[1] = ctx->Rcx; arm.X[2] = ctx->Rdx; arm.X[3] = ctx->Rbx;
+            arm.X[4] = ctx->Rsp; arm.X[5] = ctx->Rbp; arm.X[6] = ctx->Rsi; arm.X[7] = ctx->Rdi;
+            arm.X[8] = ctx->R8; arm.X[9] = ctx->R9; arm.X[10] = ctx->R10; arm.X[11] = ctx->R11;
+            arm.X[12] = ctx->R12; arm.X[13] = ctx->R13; arm.X[14] = ctx->R14; arm.X[15] = ctx->R15;
+            arm.Cpsr = ctx->EFlags;
+
+            if (isArm64Emulated)
+            {
+                if (!EmulatorARM64.Emulate(&arm, (byte*)rip))
+                    return EXCEPTION_CONTINUE_SEARCH;
+            }
+            else
+            {
+                while (IsInCodeRegion(arm.Pc))
+                {
+                    if (!EmulatorARM64.Emulate(&arm, (byte*)arm.Pc))
+                        return EXCEPTION_CONTINUE_SEARCH;
+                }
+            }
+
+            // Write back
+            ctx->Rip = arm.Pc;
+            ctx->Rsp = arm.Sp;
+            ctx->Rax = arm.X[0]; ctx->Rcx = arm.X[1]; ctx->Rdx = arm.X[2]; ctx->Rbx = arm.X[3];
+            ctx->Rbp = arm.X[5]; ctx->Rsi = arm.X[6]; ctx->Rdi = arm.X[7];
+            ctx->R8 = arm.X[8]; ctx->R9 = arm.X[9]; ctx->R10 = arm.X[10]; ctx->R11 = arm.X[11];
+            ctx->R12 = arm.X[12]; ctx->R13 = arm.X[13]; ctx->R14 = arm.X[14]; ctx->R15 = arm.X[15];
+
+            if (!isArm64Emulated)
+                SetHardwareBreakpoint(ctx, (void*)*(ulong*)ctx->Rsp);
+
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    /// <summary>Initialize for ARM64 code emulation.</summary>
+    public static void InitializeARM64(nint codeAddr, nuint codeSize)
+    {
+        isArm64CodeMode = true;
+        Initialize(codeAddr, codeSize);
     }
 
     private static void SetHardwareBreakpoint32(EmulatorX86.CONTEXT32* ctx, void* address)

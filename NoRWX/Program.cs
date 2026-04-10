@@ -2,7 +2,7 @@ namespace NoRWX;
 
 unsafe class Program
 {
-    enum Arch { X86, X64 }
+    enum Arch { X86, X64, ARM64 }
 
     static void Main()
     {
@@ -16,6 +16,9 @@ unsafe class Program
                 break;
             case System.Runtime.InteropServices.Architecture.X64:
                 Run("windows-x86_64.bin", Arch.X64);
+                break;
+            case System.Runtime.InteropServices.Architecture.Arm64:
+                Run("windows-aarch64.bin", Arch.ARM64);
                 break;
             default:
                 Console.WriteLine($"Unsupported architecture: {processArch}");
@@ -37,6 +40,9 @@ unsafe class Program
                     break;
                 case Arch.X64:
                     VectoredExceptionHandler.Initialize((nint)pBuffer, (nuint)buffer.Length);
+                    break;
+                case Arch.ARM64:
+                    VectoredExceptionHandler.InitializeARM64((nint)pBuffer, (nuint)buffer.Length);
                     break;
             }
 
