@@ -39,6 +39,60 @@
       ],
       "dependsOn": "build-x64",
       "problemMatcher": []
+    },
+    {
+      "label": "build-arm64",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "build",
+        "${workspaceFolder}/NoRWX/NoRWX.csproj",
+        "-r", "win-arm64",
+        "--self-contained",
+        "/property:GenerateFullPaths=true",
+        "/consoleloggerparameters:NoSummary;ForceNoAlign"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "run-arm64",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "run",
+        "--project", "${workspaceFolder}/NoRWX/NoRWX.csproj",
+        "-r", "win-arm64",
+        "--self-contained"
+      ],
+      "dependsOn": "build-arm64",
+      "problemMatcher": []
+    },
+    {
+      "label": "build-x86",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "build",
+        "${workspaceFolder}/NoRWX/NoRWX.csproj",
+        "-r", "win-x86",
+        "--self-contained",
+        "/property:GenerateFullPaths=true",
+        "/consoleloggerparameters:NoSummary;ForceNoAlign"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "run-x86",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "run",
+        "--project", "${workspaceFolder}/NoRWX/NoRWX.csproj",
+        "-r", "win-x86",
+        "--self-contained"
+      ],
+      "dependsOn": "build-x86",
+      "problemMatcher": []
     }
   ]
 }
