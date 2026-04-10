@@ -6,8 +6,8 @@ unsafe class Program
     {
         Console.WriteLine($"Process Architecture: {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}");
 
-        Run("HelloWorld.bin");
-        //Run("windows-x86_64.bin");
+        //Run("HelloWorld.bin");
+        Run("windows-x86_64.bin");
         
         //Console.ReadLine();
     }
