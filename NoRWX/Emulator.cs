@@ -17,11 +17,11 @@ public static unsafe class Emulator
         void Log(string mnemonic, int instrLen)
         {
             // Uncomment for debugging:
-            // string bytes = FormatBytes(address, instrLen);
-            // string instrAddr = $"0x{before.Rip:X}";
-            // var afterSnap = RegSnapshot.FromContext(ctx);
-            // string diff = FormatRegisterDiff(before, afterSnap);
-            // Console.WriteLine($"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}");
+            string bytes = FormatBytes(address, instrLen);
+            string instrAddr = $"0x{before.Rip:X}";
+            var afterSnap = RegSnapshot.FromContext(ctx);
+            string diff = FormatRegisterDiff(before, afterSnap);
+            Console.WriteLine($"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}");
         }
 
         byte opcode = *address;
