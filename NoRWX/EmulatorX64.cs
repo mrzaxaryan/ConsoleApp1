@@ -11,24 +11,20 @@ public static unsafe class EmulatorX64
     // Cached no-op delegate — avoids allocating a new closure on every instruction
     private static readonly Action<string, int> _noopLog = static (_, _) => { };
 
-    // Set to true and rebuild to enable logging
-    public static bool EnableLogging = false;
-
     public static bool Emulate(ref EXCEPTION_POINTERS exceptionInfo, byte* address)
     {
         var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
 
         Action<string, int> Log;
-        if (EnableLogging)
+        if (Core.EmulatorLogger.IsEnabled)
         {
             var before = RegSnapshot.FromContext(ctx);
             Log = (string mnemonic, int instrLen) =>
             {
                 string bytes = FormatBytes(address, Math.Min(instrLen, 15));
-                string instrAddr = $"0x{before.Rip:X}";
                 var afterSnap = RegSnapshot.FromContext(ctx);
                 string diff = FormatRegisterDiff(before, afterSnap);
-                Console.WriteLine($"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}");
+                Core.EmulatorLogger.Log($"[0x{before.Rip:X}] [{bytes}] {mnemonic}{(diff.Length > 0 ? " => " + diff : "")}");
             };
         }
         else
@@ -264,8 +260,8 @@ public static unsafe class EmulatorX64
                 return HandleTwoByteOpcode(ctx, address, Log);
 
             default:
-                string fb = FormatBytes(address, 8);
-                File.AppendAllText("emulator_log.txt", $"FAIL: unsupported opcode 0x{opcode:X2} at RIP=0x{ctx->Rip:X} bytes=[{fb}]" + Environment.NewLine);
+                if (Core.EmulatorLogger.IsEnabled)
+                    Core.EmulatorLogger.Log($"x64 UNSUPPORTED: 0x{opcode:X2} at RIP=0x{ctx->Rip:X} bytes=[{FormatBytes(address, 8)}]");
                 return false;
         }
     }

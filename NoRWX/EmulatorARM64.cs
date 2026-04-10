@@ -20,25 +20,30 @@ namespace NoRWX;
 /// </summary>
 public static unsafe class EmulatorARM64
 {
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Explicit, Size = 272)]
     public struct CONTEXT_ARM64
     {
-        // Control
-        public uint Cpsr;      // Current Program Status Register (NZCV flags in bits 31-28)
-        public ulong Pc;       // Program Counter
-        public ulong Sp;       // Stack Pointer
+        [FieldOffset(0)] public uint Cpsr;
+        [FieldOffset(8)] public ulong Pc;
+        [FieldOffset(16)] public ulong Sp;
 
-        // General purpose registers X0-X30
-        public fixed ulong X[31];
-
-        // Link register (X30 alias)
-        public ulong Lr { get => X[30]; set => X[30] = value; }
-
-        // Frame pointer (X29 alias)
-        public ulong Fp { get => X[29]; set => X[29] = value; }
-
-        // NEON/SIMD registers V0-V31 (128-bit each)
-        public fixed ulong V[64]; // 32 x 128-bit = 32 x 2 ulongs
+        // X0-X30: 31 registers at explicit offsets
+        [FieldOffset(24)] public ulong X0;  [FieldOffset(32)] public ulong X1;
+        [FieldOffset(40)] public ulong X2;  [FieldOffset(48)] public ulong X3;
+        [FieldOffset(56)] public ulong X4;  [FieldOffset(64)] public ulong X5;
+        [FieldOffset(72)] public ulong X6;  [FieldOffset(80)] public ulong X7;
+        [FieldOffset(88)] public ulong X8;  [FieldOffset(96)] public ulong X9;
+        [FieldOffset(104)] public ulong X10; [FieldOffset(112)] public ulong X11;
+        [FieldOffset(120)] public ulong X12; [FieldOffset(128)] public ulong X13;
+        [FieldOffset(136)] public ulong X14; [FieldOffset(144)] public ulong X15;
+        [FieldOffset(152)] public ulong X16; [FieldOffset(160)] public ulong X17;
+        [FieldOffset(168)] public ulong X18; [FieldOffset(176)] public ulong X19;
+        [FieldOffset(184)] public ulong X20; [FieldOffset(192)] public ulong X21;
+        [FieldOffset(200)] public ulong X22; [FieldOffset(208)] public ulong X23;
+        [FieldOffset(216)] public ulong X24; [FieldOffset(224)] public ulong X25;
+        [FieldOffset(232)] public ulong X26; [FieldOffset(240)] public ulong X27;
+        [FieldOffset(248)] public ulong X28; [FieldOffset(256)] public ulong X29;
+        [FieldOffset(264)] public ulong X30;
     }
 
     // NZCV flag positions in CPSR
@@ -49,68 +54,65 @@ public static unsafe class EmulatorARM64
     public const uint NZCV_MASK = N_FLAG | Z_FLAG | C_FLAG | V_FLAG;
 
     private static readonly Action<string, int> _noopLog = static (_, _) => { };
-    public static bool EnableLogging = false;
+    // Logging controlled by EmulatorLogger.Target
 
-    /// <summary>Read register Xn (n=0..30). X31 reads as SP or zero depending on context.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong* Xn(CONTEXT_ARM64* ctx, int n) => &ctx->X0 + n;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong ReadX(CONTEXT_ARM64* ctx, int n)
     {
         if (n == 31) return 0; // XZR
-        return ctx->X[n];
+        return Xn(ctx, n)[0];
     }
 
-    /// <summary>Read register Xn where X31 = SP (not XZR).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong ReadXSp(CONTEXT_ARM64* ctx, int n)
     {
         if (n == 31) return ctx->Sp;
-        return ctx->X[n];
+        return Xn(ctx, n)[0];
     }
 
-    /// <summary>Read register Wn (low 32 bits).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint ReadW(CONTEXT_ARM64* ctx, int n)
     {
         if (n == 31) return 0;
-        return (uint)ctx->X[n];
+        return (uint)Xn(ctx, n)[0];
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint ReadWSp(CONTEXT_ARM64* ctx, int n)
     {
         if (n == 31) return (uint)ctx->Sp;
-        return (uint)ctx->X[n];
+        return (uint)Xn(ctx, n)[0];
     }
 
-    /// <summary>Write register Xn. X31 writes are discarded (XZR).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteX(CONTEXT_ARM64* ctx, int n, ulong val)
     {
         if (n == 31) return;
-        ctx->X[n] = val;
+        Xn(ctx, n)[0] = val;
     }
 
-    /// <summary>Write register Xn where X31 = SP.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteXSp(CONTEXT_ARM64* ctx, int n, ulong val)
     {
         if (n == 31) { ctx->Sp = val; return; }
-        ctx->X[n] = val;
+        Xn(ctx, n)[0] = val;
     }
 
-    /// <summary>Write register Wn (zero-extends to 64 bits).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteW(CONTEXT_ARM64* ctx, int n, uint val)
     {
         if (n == 31) return;
-        ctx->X[n] = val; // zero-extend
+        Xn(ctx, n)[0] = val; // zero-extend
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteWSp(CONTEXT_ARM64* ctx, int n, uint val)
     {
         if (n == 31) { ctx->Sp = (ctx->Sp & 0xFFFFFFFF00000000) | val; return; }
-        ctx->X[n] = val;
+        Xn(ctx, n)[0] = val;
     }
 
     // ========== NZCV Flag helpers ==========
@@ -245,6 +247,62 @@ public static unsafe class EmulatorARM64
         return extended << shift;
     }
 
+    /// <summary>
+    /// Emulate using x64 CONTEXT directly (no CONTEXT_ARM64 allocation).
+    /// Maps: Rax→X0, Rcx→X1, Rdx→X2, Rbx→X3, Rsp→X4/SP, Rbp→X5,
+    ///       Rsi→X6, Rdi→X7, R8-R15→X8-X15, Rip→PC, EFlags→CPSR.
+    /// Only X0-X15 are mapped; X16-X30 use a static backing store.
+    /// </summary>
+    // Static backing for X16-X30 (not mapped to x64 registers)
+    private static ulong _x16, _x17, _x18, _x19, _x20, _x21, _x22, _x23;
+    private static ulong _x24, _x25, _x26, _x27, _x28, _x29, _x30;
+
+    public static bool EmulateRaw(EmulatorX64.CONTEXT* ctx64, byte* address)
+    {
+        // Build ARM64 context on stack from x64 registers — no managed alloc
+        CONTEXT_ARM64 arm;
+        arm.Pc = ctx64->Rip;
+        arm.Sp = ctx64->Rsp;
+        arm.Cpsr = ctx64->EFlags;
+
+        // Map x64 GPRs → ARM64 X0-X15
+        arm.X0 = ctx64->Rax; arm.X1 = ctx64->Rcx;
+        arm.X2 = ctx64->Rdx; arm.X3 = ctx64->Rbx;
+        arm.X4 = ctx64->Rsp; arm.X5 = ctx64->Rbp;
+        arm.X6 = ctx64->Rsi; arm.X7 = ctx64->Rdi;
+        arm.X8 = ctx64->R8;  arm.X9 = ctx64->R9;
+        arm.X10 = ctx64->R10; arm.X11 = ctx64->R11;
+        arm.X12 = ctx64->R12; arm.X13 = ctx64->R13;
+        arm.X14 = ctx64->R14; arm.X15 = ctx64->R15;
+
+        // X16-X30 from static fields
+        arm.X16 = _x16; arm.X17 = _x17; arm.X18 = _x18; arm.X19 = _x19;
+        arm.X20 = _x20; arm.X21 = _x21; arm.X22 = _x22; arm.X23 = _x23;
+        arm.X24 = _x24; arm.X25 = _x25; arm.X26 = _x26; arm.X27 = _x27;
+        arm.X28 = _x28; arm.X29 = _x29; arm.X30 = _x30;
+
+        bool ok = Emulate(&arm, address);
+
+        if (ok)
+        {
+            ctx64->Rip = arm.Pc; ctx64->Rsp = arm.Sp; ctx64->EFlags = arm.Cpsr;
+            ctx64->Rax = arm.X0; ctx64->Rcx = arm.X1;
+            ctx64->Rdx = arm.X2; ctx64->Rbx = arm.X3;
+            ctx64->Rbp = arm.X5; ctx64->Rsi = arm.X6;
+            ctx64->Rdi = arm.X7;
+            ctx64->R8 = arm.X8;  ctx64->R9 = arm.X9;
+            ctx64->R10 = arm.X10; ctx64->R11 = arm.X11;
+            ctx64->R12 = arm.X12; ctx64->R13 = arm.X13;
+            ctx64->R14 = arm.X14; ctx64->R15 = arm.X15;
+            _x16 = arm.X16; _x17 = arm.X17; _x18 = arm.X18; _x19 = arm.X19;
+            _x20 = arm.X20; _x21 = arm.X21; _x22 = arm.X22; _x23 = arm.X23;
+            _x24 = arm.X24; _x25 = arm.X25; _x26 = arm.X26; _x27 = arm.X27;
+            _x28 = arm.X28; _x29 = arm.X29; _x30 = arm.X30;
+        }
+
+        return ok;
+    }
+
     // ========== Main dispatch ==========
 
     public static bool Emulate(CONTEXT_ARM64* ctx, byte* address)
@@ -253,6 +311,8 @@ public static unsafe class EmulatorARM64
 
         // ARM64 instruction groups by bits [28:25]
         int op0 = (int)(instr >> 25) & 0xF;
+        if (Core.EmulatorLogger.IsEnabled)
+            Core.EmulatorLogger.Log($"ARM64: instr=0x{instr:X8} op0={op0} PC=0x{ctx->Pc:X}");
 
         switch (op0)
         {
@@ -283,196 +343,152 @@ public static unsafe class EmulatorARM64
 
     private static bool HandleDataProcImm(CONTEXT_ARM64* ctx, uint instr)
     {
-        int op1 = (int)(instr >> 23) & 0x7;
+        // Discriminate by the fixed opcode bits within the encoding.
+        // Use bits[28:23] to determine the specific DP-immediate sub-group.
+        int fixed6 = (int)(instr >> 23) & 0x3F;
 
-        switch (op1)
+        // PC-rel addressing: bit28=0 (ADR if bit31=0, ADRP if bit31=1)
+        if ((fixed6 & 0x20) == 0) // bit28=0
         {
-            case 0b000: case 0b001: // PC-rel addressing (ADR/ADRP)
-            {
-                bool isAdrp = (instr >> 31) != 0;
-                int immlo = (int)(instr >> 29) & 3;
-                int immhi = (int)(instr >> 5) & 0x7FFFF;
-                long imm = ((long)((immhi << 2) | immlo) << 43) >> 43; // sign-extend 21 bits
-                int rd = (int)(instr & 0x1F);
-
-                if (isAdrp)
-                {
-                    ulong page = ctx->Pc & ~0xFFFUL;
-                    WriteX(ctx, rd, page + ((ulong)imm << 12));
-                }
-                else
-                {
-                    WriteX(ctx, rd, ctx->Pc + (ulong)imm);
-                }
-                ctx->Pc += 4;
-                return true;
-            }
-
-            case 0b010: // Add/subtract immediate
-            {
-                bool sf = (instr >> 31) != 0;    // 1=64-bit, 0=32-bit
-                bool op = ((instr >> 30) & 1) != 0; // 0=ADD, 1=SUB
-                bool S = ((instr >> 29) & 1) != 0;  // set flags
-                int shift = (int)(instr >> 22) & 3;  // 0=none, 1=LSL#12
-                uint imm12 = (instr >> 10) & 0xFFF;
-                int rn = (int)(instr >> 5) & 0x1F;
-                int rd = (int)(instr & 0x1F);
-
-                ulong immVal = shift == 1 ? (ulong)imm12 << 12 : imm12;
-
-                if (sf)
-                {
-                    ulong a = S ? ReadXSp(ctx, rn) : ReadXSp(ctx, rn);
-                    ulong result = op ? a - immVal : a + immVal;
-                    if (S)
-                    {
-                        if (op) SetNZCV_Sub64(ctx, a, immVal, result);
-                        else SetNZCV_Add64(ctx, a, immVal, result);
-                        WriteX(ctx, rd, result);
-                    }
-                    else
-                        WriteXSp(ctx, rd, result);
-                }
-                else
-                {
-                    uint a = S ? ReadWSp(ctx, rn) : ReadWSp(ctx, rn);
-                    uint result = op ? a - (uint)immVal : a + (uint)immVal;
-                    if (S)
-                    {
-                        if (op) SetNZCV_Sub32(ctx, a, (uint)immVal, result);
-                        else SetNZCV_Add32(ctx, a, (uint)immVal, result);
-                        WriteW(ctx, rd, result);
-                    }
-                    else
-                        WriteWSp(ctx, rd, result);
-                }
-                ctx->Pc += 4;
-                return true;
-            }
-
-            case 0b011: // Logical immediate
-            {
-                bool sf = (instr >> 31) != 0;
-                int opc = (int)(instr >> 29) & 3;
-                int rd = (int)(instr & 0x1F);
-                int rn = (int)(instr >> 5) & 0x1F;
-
-                ulong imm = DecodeBitmaskImm(instr, sf);
-
-                if (sf)
-                {
-                    ulong a = ReadX(ctx, rn);
-                    ulong result = opc switch { 0 => a & imm, 1 => a | imm, 2 => a ^ imm, 3 => a & imm, _ => a };
-                    if (opc == 3) { SetNZ64(ctx, result); WriteX(ctx, rd, result); } // ANDS
-                    else WriteXSp(ctx, rd, result);
-                }
-                else
-                {
-                    uint a = ReadW(ctx, rn);
-                    uint result = opc switch { 0 => a & (uint)imm, 1 => a | (uint)imm, 2 => a ^ (uint)imm, 3 => a & (uint)imm, _ => a };
-                    if (opc == 3) { SetNZ32(ctx, result); WriteW(ctx, rd, result); }
-                    else WriteWSp(ctx, rd, result);
-                }
-                ctx->Pc += 4;
-                return true;
-            }
-
-            case 0b100: // Move wide immediate (MOVN/MOVZ/MOVK)
-            {
-                bool sf = (instr >> 31) != 0;
-                int opc = (int)(instr >> 29) & 3;
-                int hw = (int)(instr >> 21) & 3;
-                uint imm16 = (instr >> 5) & 0xFFFF;
-                int rd = (int)(instr & 0x1F);
-                int shift = hw * 16;
-
-                if (opc == 0) // MOVN
-                {
-                    ulong val = ~((ulong)imm16 << shift);
-                    if (!sf) val &= 0xFFFFFFFF;
-                    WriteX(ctx, rd, val);
-                }
-                else if (opc == 2) // MOVZ
-                {
-                    WriteX(ctx, rd, (ulong)imm16 << shift);
-                }
-                else if (opc == 3) // MOVK
-                {
-                    ulong old = ReadX(ctx, rd);
-                    ulong mask = ~(0xFFFFUL << shift);
-                    WriteX(ctx, rd, (old & mask) | ((ulong)imm16 << shift));
-                }
-                ctx->Pc += 4;
-                return true;
-            }
-
-            case 0b101: // Bitfield (SBFM/BFM/UBFM)
-            {
-                bool sf = (instr >> 31) != 0;
-                int opc = (int)(instr >> 29) & 3;
-                int immr = (int)(instr >> 16) & 0x3F;
-                int imms = (int)(instr >> 10) & 0x3F;
-                int rn = (int)(instr >> 5) & 0x1F;
-                int rd = (int)(instr & 0x1F);
-                int regSize = sf ? 64 : 32;
-
-                ulong src = ReadX(ctx, rn);
-                ulong dst = ReadX(ctx, rd);
-
-                if (opc == 2) // UBFM (also LSL, LSR, UXTB, UXTH)
-                {
-                    ulong rotated = sf ? ShiftReg64(src, 3, immr) : ShiftReg32((uint)src, 3, immr);
-                    ulong mask = imms < (regSize - 1) ? (1UL << (imms + 1)) - 1 : ulong.MaxValue;
-                    WriteX(ctx, rd, rotated & mask);
-                }
-                else if (opc == 0) // SBFM (also ASR, SXTB, SXTH, SXTW)
-                {
-                    ulong rotated = sf ? ShiftReg64(src, 3, immr) : ShiftReg32((uint)src, 3, immr);
-                    int topBit = imms;
-                    ulong mask = (1UL << (imms + 1)) - 1;
-                    ulong result = rotated & mask;
-                    // Sign extend from bit imms
-                    if (imms < regSize - 1 && ((result >> imms) & 1) != 0)
-                        result |= ~mask;
-                    if (!sf) result &= 0xFFFFFFFF;
-                    WriteX(ctx, rd, result);
-                }
-                else if (opc == 1) // BFM (BFI/BFXIL)
-                {
-                    ulong rotated = sf ? ShiftReg64(src, 3, immr) : ShiftReg32((uint)src, 3, immr);
-                    ulong mask = (1UL << (imms + 1)) - 1;
-                    WriteX(ctx, rd, (dst & ~mask) | (rotated & mask));
-                }
-
-                ctx->Pc += 4;
-                return true;
-            }
-
-            case 0b110: // Extract (EXTR)
-            {
-                bool sf = (instr >> 31) != 0;
-                int rm = (int)(instr >> 16) & 0x1F;
-                int imms = (int)(instr >> 10) & 0x3F;
-                int rn = (int)(instr >> 5) & 0x1F;
-                int rd = (int)(instr & 0x1F);
-
-                if (sf)
-                {
-                    UInt128 concat = ((UInt128)ReadX(ctx, rn) << 64) | ReadX(ctx, rm);
-                    WriteX(ctx, rd, (ulong)(concat >> imms));
-                }
-                else
-                {
-                    ulong concat = ((ulong)ReadW(ctx, rn) << 32) | ReadW(ctx, rm);
-                    WriteW(ctx, rd, (uint)(concat >> imms));
-                }
-                ctx->Pc += 4;
-                return true;
-            }
-
-            default:
-                return false;
+            bool isAdrp = (instr >> 31) != 0;
+            int immlo = (int)(instr >> 29) & 3;
+            int immhi = (int)(instr >> 5) & 0x7FFFF;
+            long imm = ((long)((immhi << 2) | immlo) << 43) >> 43;
+            int rd = (int)(instr & 0x1F);
+            if (isAdrp)
+                WriteX(ctx, rd, (ctx->Pc & ~0xFFFUL) + ((ulong)imm << 12));
+            else
+                WriteX(ctx, rd, ctx->Pc + (ulong)imm);
+            ctx->Pc += 4;
+            return true;
         }
+
+        // Add/subtract immediate: bits[28:24] = 10001
+        if ((fixed6 >> 1 & 0x1F) == 0b10001)
+        {
+            bool sf = (instr >> 31) != 0;
+            bool op = ((instr >> 30) & 1) != 0;
+            bool S = ((instr >> 29) & 1) != 0;
+            int shift = (int)(instr >> 22) & 3;
+            uint imm12 = (instr >> 10) & 0xFFF;
+            int rn = (int)(instr >> 5) & 0x1F;
+            int rd = (int)(instr & 0x1F);
+            ulong immVal = shift == 1 ? (ulong)imm12 << 12 : imm12;
+
+            if (sf)
+            {
+                ulong a = ReadXSp(ctx, rn);
+                ulong result = op ? a - immVal : a + immVal;
+                if (S) { if (op) SetNZCV_Sub64(ctx, a, immVal, result); else SetNZCV_Add64(ctx, a, immVal, result); WriteX(ctx, rd, result); }
+                else WriteXSp(ctx, rd, result);
+            }
+            else
+            {
+                uint a = ReadWSp(ctx, rn);
+                uint result = op ? a - (uint)immVal : a + (uint)immVal;
+                if (S) { if (op) SetNZCV_Sub32(ctx, a, (uint)immVal, result); else SetNZCV_Add32(ctx, a, (uint)immVal, result); WriteW(ctx, rd, result); }
+                else WriteWSp(ctx, rd, result);
+            }
+            ctx->Pc += 4;
+            return true;
+        }
+
+        // Logical immediate: bits[28:23] = 100100
+        if (fixed6 == 0b100100)
+        {
+            bool sf = (instr >> 31) != 0;
+            int opc = (int)(instr >> 29) & 3;
+            int rd = (int)(instr & 0x1F);
+            int rn = (int)(instr >> 5) & 0x1F;
+            ulong imm = DecodeBitmaskImm(instr, sf);
+
+            if (sf)
+            {
+                ulong a = ReadX(ctx, rn);
+                ulong result = opc switch { 0 => a & imm, 1 => a | imm, 2 => a ^ imm, 3 => a & imm, _ => a };
+                if (opc == 3) { SetNZ64(ctx, result); WriteX(ctx, rd, result); }
+                else WriteXSp(ctx, rd, result);
+            }
+            else
+            {
+                uint a = ReadW(ctx, rn);
+                uint result = opc switch { 0 => a & (uint)imm, 1 => a | (uint)imm, 2 => a ^ (uint)imm, 3 => a & (uint)imm, _ => a };
+                if (opc == 3) { SetNZ32(ctx, result); WriteW(ctx, rd, result); }
+                else WriteWSp(ctx, rd, result);
+            }
+            ctx->Pc += 4;
+            return true;
+        }
+
+        // Move wide immediate: bits[28:23] = 100101
+        if (fixed6 == 0b100101)
+        {
+            bool sf = (instr >> 31) != 0;
+            int opc = (int)(instr >> 29) & 3;
+            int hw = (int)(instr >> 21) & 3;
+            uint imm16 = (instr >> 5) & 0xFFFF;
+            int rd = (int)(instr & 0x1F);
+            int shift = hw * 16;
+
+            if (opc == 0) // MOVN
+            {
+                ulong val = ~((ulong)imm16 << shift);
+                if (!sf) val &= 0xFFFFFFFF;
+                WriteX(ctx, rd, val);
+            }
+            else if (opc == 2) // MOVZ
+            {
+                WriteX(ctx, rd, (ulong)imm16 << shift);
+            }
+            else if (opc == 3) // MOVK
+            {
+                ulong old = ReadX(ctx, rd);
+                ulong mask = ~(0xFFFFUL << shift);
+                WriteX(ctx, rd, (old & mask) | ((ulong)imm16 << shift));
+            }
+            ctx->Pc += 4;
+            return true;
+        }
+
+        // Bitfield: bits[28:23] = 100110
+        if (fixed6 == 0b100110)
+        {
+            bool sf = (instr >> 31) != 0;
+            int opc = (int)(instr >> 29) & 3;
+            int immr = (int)(instr >> 16) & 0x3F;
+            int imms = (int)(instr >> 10) & 0x3F;
+            int rn = (int)(instr >> 5) & 0x1F;
+            int rd = (int)(instr & 0x1F);
+            int regSize = sf ? 64 : 32;
+            ulong src = ReadX(ctx, rn);
+            ulong dst = ReadX(ctx, rd);
+
+            if (opc == 2)
+            { ulong rot = sf ? ShiftReg64(src, 3, immr) : ShiftReg32((uint)src, 3, immr); ulong mask = imms < regSize - 1 ? (1UL << (imms + 1)) - 1 : ulong.MaxValue; WriteX(ctx, rd, rot & mask); }
+            else if (opc == 0)
+            { ulong rot = sf ? ShiftReg64(src, 3, immr) : ShiftReg32((uint)src, 3, immr); ulong mask = (1UL << (imms + 1)) - 1; ulong result = rot & mask; if (imms < regSize - 1 && ((result >> imms) & 1) != 0) result |= ~mask; if (!sf) result &= 0xFFFFFFFF; WriteX(ctx, rd, result); }
+            else if (opc == 1)
+            { ulong rot = sf ? ShiftReg64(src, 3, immr) : ShiftReg32((uint)src, 3, immr); ulong mask = (1UL << (imms + 1)) - 1; WriteX(ctx, rd, (dst & ~mask) | (rot & mask)); }
+
+            ctx->Pc += 4;
+            return true;
+        }
+
+        // Extract: bits[28:23] = 100111
+        if (fixed6 == 0b100111)
+        {
+            bool sf = (instr >> 31) != 0;
+            int rm = (int)(instr >> 16) & 0x1F;
+            int imms = (int)(instr >> 10) & 0x3F;
+            int rn = (int)(instr >> 5) & 0x1F;
+            int rd = (int)(instr & 0x1F);
+            if (sf) { UInt128 c = ((UInt128)ReadX(ctx, rn) << 64) | ReadX(ctx, rm); WriteX(ctx, rd, (ulong)(c >> imms)); }
+            else { ulong c = ((ulong)ReadW(ctx, rn) << 32) | ReadW(ctx, rm); WriteW(ctx, rd, (uint)(c >> imms)); }
+            ctx->Pc += 4;
+            return true;
+        }
+
+        return false;
     }
 
     // ========== Branch, Exception, System ==========
@@ -487,7 +503,7 @@ public static unsafe class EmulatorARM64
             int imm26 = (int)(instr & 0x3FFFFFF);
             long offset = ((long)(imm26 << 6)) >> 4; // sign-extend and *4
 
-            if (isLink) ctx->X[30] = ctx->Pc + 4;
+            if (isLink) ctx->X30 = ctx->Pc + 4;
             ctx->Pc = (ulong)((long)ctx->Pc + offset);
             return true;
         }
@@ -543,7 +559,7 @@ public static unsafe class EmulatorARM64
                     ctx->Pc = ReadX(ctx, rn);
                     return true;
                 case 0b0001: // BLR
-                    ctx->X[30] = ctx->Pc + 4;
+                    ctx->X30 = ctx->Pc + 4;
                     ctx->Pc = ReadX(ctx, rn);
                     return true;
                 case 0b0010: // RET

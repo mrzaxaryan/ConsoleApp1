@@ -58,7 +58,7 @@ public static unsafe class EmulatorX86
     }
 
     private static readonly Action<string, int> _noopLog = static (_, _) => { };
-    public static bool EnableLogging = false;
+    // Logging controlled by EmulatorLogger.Target
 
     /// <summary>
     /// Emulate a single i386 instruction at the given address.
@@ -67,11 +67,11 @@ public static unsafe class EmulatorX86
     public static bool Emulate(CONTEXT32* ctx, byte* address)
     {
         Action<string, int> Log = _noopLog;
-        if (EnableLogging)
+        if (Core.EmulatorLogger.IsEnabled)
         {
             Log = (string mnemonic, int instrLen) =>
             {
-                Console.WriteLine($"[0x{ctx->Eip:X8}] {mnemonic}");
+                Core.EmulatorLogger.Log($"[0x{ctx->Eip:X8}] {mnemonic}");
             };
         }
 
@@ -483,7 +483,8 @@ public static unsafe class EmulatorX86
             }
 
             default:
-                File.AppendAllText("emulator_log.txt", $"i386 UNSUPPORTED: 0x{opcode:X2} at EIP=0x{ctx->Eip:X8} bytes=[{address[0]:X2} {address[1]:X2} {address[2]:X2} {address[3]:X2}]" + Environment.NewLine);
+                if (Core.EmulatorLogger.IsEnabled)
+                    Core.EmulatorLogger.Log($"x86 UNSUPPORTED: 0x{opcode:X2} at EIP=0x{ctx->Eip:X8} bytes=[{address[0]:X2} {address[1]:X2} {address[2]:X2} {address[3]:X2}]");
                 return false;
         }
     }
@@ -608,7 +609,8 @@ public static unsafe class EmulatorX86
             return true;
         }
 
-        File.AppendAllText("emulator_log.txt", $"i386 UNSUPPORTED FS:{op:X2} at EIP=0x{ctx->Eip:X8}" + Environment.NewLine);
+        if (Core.EmulatorLogger.IsEnabled)
+            Core.EmulatorLogger.Log($"x86 UNSUPPORTED FS:0x{op:X2} at EIP=0x{ctx->Eip:X8}");
         return false;
     }
 
@@ -760,7 +762,8 @@ public static unsafe class EmulatorX86
                 return true;
 
             default:
-                File.AppendAllText("emulator_log.txt", $"i386 UNSUPPORTED 66 {op:X2} at EIP=0x{ctx->Eip:X8}" + Environment.NewLine);
+                if (Core.EmulatorLogger.IsEnabled)
+                    Core.EmulatorLogger.Log($"x86 UNSUPPORTED 66 0x{op:X2} at EIP=0x{ctx->Eip:X8}");
                 return false;
         }
     }
@@ -1372,8 +1375,8 @@ public static unsafe class EmulatorX86
             }
 
             default:
-                if (EnableLogging)
-                    Console.WriteLine($"i386 UNSUPPORTED 0F {op2:X2} at EIP=0x{ctx->Eip:X8}");
+                if (Core.EmulatorLogger.IsEnabled)
+                    Core.EmulatorLogger.Log($"x86 UNSUPPORTED 0F 0x{op2:X2} at EIP=0x{ctx->Eip:X8}");
                 return false;
         }
     }

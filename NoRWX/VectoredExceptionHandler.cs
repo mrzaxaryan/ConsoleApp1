@@ -8,7 +8,6 @@ public static unsafe class VectoredExceptionHandler
 {
     private delegate uint ExceptionHandlerDelegate(ref EXCEPTION_POINTERS exceptionInfo);
 
-    private static int executedInstructionCount = 0;
     private static nint vectoredExceptionHandlerHandle;
     private static nint executingCodeAddress = nint.Zero;
     private static nuint executingCodeSize = nuint.Zero;
@@ -156,8 +155,87 @@ public static unsafe class VectoredExceptionHandler
 
     private static uint ExceptionHandlerARM64(ref EXCEPTION_POINTERS exceptionInfo, uint code)
     {
-        // ARM64 code emulation uses the x64 CONTEXT (since we run from a 64-bit host process)
-        // We translate the register state to/from CONTEXT_ARM64
+        bool isNativeArm64 = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture
+            == System.Runtime.InteropServices.Architecture.Arm64;
+
+        if (isNativeArm64)
+            return ExceptionHandlerARM64Native(ref exceptionInfo, code);
+        else
+            return ExceptionHandlerARM64Prism(ref exceptionInfo, code);
+    }
+
+    /// <summary>Native ARM64 process: ContextRecord is a Windows ARM64_NT_CONTEXT.</summary>
+    private static uint ExceptionHandlerARM64Native(ref EXCEPTION_POINTERS exceptionInfo, uint code)
+    {
+        // Windows ARM64 CONTEXT layout (ARM64_NT_CONTEXT):
+        // Offset 0x000: ContextFlags (4) + Cpsr (4)
+        // Offset 0x008: X0-X28 (29 * 8 = 232 bytes)
+        // Offset 0x0F0: Fp (X29) (8)
+        // Offset 0x0F8: Lr (X30) (8)
+        // Offset 0x100: Sp (8)
+        // Offset 0x108: Pc (8)
+        byte* ctxBase = (byte*)exceptionInfo.ContextRecord;
+        ulong* pPc = (ulong*)(ctxBase + 0x108);
+        ulong* pSp = (ulong*)(ctxBase + 0x100);
+        ulong* pX0 = (ulong*)(ctxBase + 0x008); // X0..X28 as array
+        ulong* pFp = (ulong*)(ctxBase + 0x0F0); // X29
+        ulong* pLr = (ulong*)(ctxBase + 0x0F8); // X30
+        uint* pCpsr = (uint*)(ctxBase + 0x004);
+
+        ulong pc = *pPc;
+
+        if (code != EXCEPTION_ACCESS_VIOLATION)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // On native ARM64, PC might not point to our buffer (it might be the
+        // faulting BLR instruction). Check ExceptionInformation[1] for the target.
+        ulong faultAddr = pc;
+        if (!IsInCodeRegion(pc))
+        {
+            byte* exRec = (byte*)exceptionInfo.ExceptionRecord;
+            ulong targetAddr = *(ulong*)(exRec + 40);
+            if (IsInCodeRegion(targetAddr))
+            {
+                faultAddr = targetAddr;
+                *pPc = targetAddr;
+                pc = targetAddr;
+            }
+        }
+
+        if (!IsInCodeRegion(faultAddr))
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // Build ARM64 context from the native CONTEXT
+        var arm = new EmulatorARM64.CONTEXT_ARM64();
+        arm.Pc = pc;
+        arm.Sp = *pSp;
+        arm.Cpsr = *pCpsr;
+        // X0-X28
+        ulong* armRegs = &arm.X0;
+        for (int i = 0; i < 29; i++)
+            armRegs[i] = pX0[i];
+        arm.X29 = *pFp;
+        arm.X30 = *pLr;
+
+        // Emulate one instruction (single-step on ARM64)
+        if (!EmulatorARM64.Emulate(&arm, (byte*)pc))
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // Write back
+        *pPc = arm.Pc;
+        *pSp = arm.Sp;
+        *pCpsr = arm.Cpsr;
+        for (int i = 0; i < 29; i++)
+            pX0[i] = armRegs[i];
+        *pFp = arm.X29;
+        *pLr = arm.X30;
+
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    /// <summary>x64 process (Prism) emulating ARM64 code: ContextRecord is x64 CONTEXT.</summary>
+    private static uint ExceptionHandlerARM64Prism(ref EXCEPTION_POINTERS exceptionInfo, uint code)
+    {
         var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
         ulong rip = ctx->Rip;
 
@@ -166,40 +244,8 @@ public static unsafe class VectoredExceptionHandler
 
         if (isOurException && IsInCodeRegion(rip))
         {
-            // Map x64 CONTEXT registers to ARM64 CONTEXT
-            var arm = new EmulatorARM64.CONTEXT_ARM64();
-            arm.Pc = ctx->Rip;
-            arm.Sp = ctx->Rsp;
-            arm.X[0] = ctx->Rax; arm.X[1] = ctx->Rcx; arm.X[2] = ctx->Rdx; arm.X[3] = ctx->Rbx;
-            arm.X[4] = ctx->Rsp; arm.X[5] = ctx->Rbp; arm.X[6] = ctx->Rsi; arm.X[7] = ctx->Rdi;
-            arm.X[8] = ctx->R8; arm.X[9] = ctx->R9; arm.X[10] = ctx->R10; arm.X[11] = ctx->R11;
-            arm.X[12] = ctx->R12; arm.X[13] = ctx->R13; arm.X[14] = ctx->R14; arm.X[15] = ctx->R15;
-            arm.Cpsr = ctx->EFlags;
-
-            if (isArm64Emulated)
-            {
-                if (!EmulatorARM64.Emulate(&arm, (byte*)rip))
-                    return EXCEPTION_CONTINUE_SEARCH;
-            }
-            else
-            {
-                while (IsInCodeRegion(arm.Pc))
-                {
-                    if (!EmulatorARM64.Emulate(&arm, (byte*)arm.Pc))
-                        return EXCEPTION_CONTINUE_SEARCH;
-                }
-            }
-
-            // Write back
-            ctx->Rip = arm.Pc;
-            ctx->Rsp = arm.Sp;
-            ctx->Rax = arm.X[0]; ctx->Rcx = arm.X[1]; ctx->Rdx = arm.X[2]; ctx->Rbx = arm.X[3];
-            ctx->Rbp = arm.X[5]; ctx->Rsi = arm.X[6]; ctx->Rdi = arm.X[7];
-            ctx->R8 = arm.X[8]; ctx->R9 = arm.X[9]; ctx->R10 = arm.X[10]; ctx->R11 = arm.X[11];
-            ctx->R12 = arm.X[12]; ctx->R13 = arm.X[13]; ctx->R14 = arm.X[14]; ctx->R15 = arm.X[15];
-
-            if (!isArm64Emulated)
-                SetHardwareBreakpoint(ctx, (void*)*(ulong*)ctx->Rsp);
+            if (!EmulatorARM64.EmulateRaw(ctx, (byte*)rip))
+                return EXCEPTION_CONTINUE_SEARCH;
 
             return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -238,7 +284,6 @@ public static unsafe class VectoredExceptionHandler
     {
         executingCodeAddress = codeAddr;
         executingCodeSize = codeSize;
-        executedInstructionCount = 0;
 
         // Detect ARM64 emulation
         if (IsWow64Process2(GetCurrentProcess(), out ushort processMachine, out ushort nativeMachine))
