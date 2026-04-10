@@ -21,18 +21,44 @@ namespace NoRWX;
 /// </summary>
 public static unsafe class EmulatorX86
 {
+    /// <summary>
+    /// Matches the Windows x86 CONTEXT structure layout exactly.
+    /// See: https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-context
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     public struct CONTEXT32
     {
+        public uint ContextFlags;
+
+        // Debug registers
+        public uint Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
+
+        // Floating point - FLOATING_SAVE_AREA (112 bytes)
+        public uint FloatControlWord, FloatStatusWord, FloatTagWord;
+        public uint FloatErrorOffset, FloatErrorSelector;
+        public uint FloatDataOffset, FloatDataSelector;
+        public unsafe fixed byte FloatRegisters[80]; // 8 x 10-byte FP regs
+        public uint FloatCr0NpxState;
+
+        // Segment registers
+        public uint SegGs, SegFs, SegEs, SegDs;
+
+        // Integer registers (note: reverse order from what you'd expect)
+        public uint Edi, Esi, Ebx, Edx, Ecx, Eax;
+
+        // Control registers
+        public uint Ebp, Eip;
+        public uint SegCs;
         public uint EFlags;
-        public uint Eax, Ecx, Edx, Ebx, Esp, Ebp, Esi, Edi;
-        public uint Eip;
-        public ushort SegCs, SegDs, SegEs, SegFs, SegGs, SegSs;
-        public uint MxCsr;
+        public uint Esp;
+        public uint SegSs;
+
+        // Extended registers (512 bytes)
+        public unsafe fixed byte ExtendedRegisters[512];
     }
 
     private static readonly Action<string, int> _noopLog = static (_, _) => { };
-    public static bool EnableLogging = true;
+    public static bool EnableLogging = false;
 
     /// <summary>
     /// Emulate a single i386 instruction at the given address.
@@ -217,6 +243,18 @@ public static unsafe class EmulatorX86
             case 0x0A: case 0x0B: return HandleAluRRm(ctx, address, 1, opcode, Log);
             case 0x0C: return HandleAluAccImm8(ctx, address, 1, Log);
             case 0x0D: return HandleAluAccImm32(ctx, address, 1, Log);
+
+            // === ADC ===
+            case 0x10: case 0x11: return HandleAluRmR(ctx, address, 2, opcode, Log);
+            case 0x12: case 0x13: return HandleAluRRm(ctx, address, 2, opcode, Log);
+            case 0x14: return HandleAluAccImm8(ctx, address, 2, Log);
+            case 0x15: return HandleAluAccImm32(ctx, address, 2, Log);
+
+            // === SBB ===
+            case 0x18: case 0x19: return HandleAluRmR(ctx, address, 3, opcode, Log);
+            case 0x1A: case 0x1B: return HandleAluRRm(ctx, address, 3, opcode, Log);
+            case 0x1C: return HandleAluAccImm8(ctx, address, 3, Log);
+            case 0x1D: return HandleAluAccImm32(ctx, address, 3, Log);
 
             // === AND ===
             case 0x20: case 0x21: return HandleAluRmR(ctx, address, 4, opcode, Log);
@@ -403,14 +441,7 @@ public static unsafe class EmulatorX86
 
             // === Operand-size prefix (0x66) ===
             case 0x66:
-            {
-                // 16-bit operand override — recurse with next byte
-                // Most common: 66 + MOV/ADD/CMP with 16-bit operands
-                // For now, skip prefix and handle next opcode (simplified)
-                Log("66 prefix (16-bit)", 1);
-                ctx->Eip += 1;
-                return Emulate(ctx, address + 1);
-            }
+                return Handle66Prefix(ctx, address, Log);
 
             // === REP/REPNE ===
             case 0xF2: case 0xF3:
@@ -431,14 +462,28 @@ public static unsafe class EmulatorX86
             // === Two-byte escape (0F) ===
             case 0x0F: return HandleTwoByte32(ctx, address, Log);
 
-            // === Segment overrides (skip) ===
-            case 0x26: case 0x2E: case 0x36: case 0x3E: case 0x64: case 0x65:
+            // === FS segment override (0x64) — TEB access on x86 ===
+            case 0x64:
+                return HandleFsPrefix(ctx, address, Log);
+
+            // === Other segment overrides (skip) ===
+            case 0x26: case 0x2E: case 0x36: case 0x3E: case 0x65:
+            {
+                // Skip prefix, adjust EIP, re-dispatch
+                byte next = address[1];
+                int offs = 2;
+                byte modrm = address[offs++];
+                byte mod = (byte)(modrm >> 6 & 3);
+                int reg = (modrm >> 3) & 7;
+                int rm = modrm & 7;
+                if (mod != 0b11) ResolveEA32(ctx, address, ref offs, mod, rm);
+                // For simplicity, just treat as the non-prefixed instruction
                 ctx->Eip += 1;
                 return Emulate(ctx, address + 1);
+            }
 
             default:
-                if (EnableLogging)
-                    Console.WriteLine($"i386 UNSUPPORTED: 0x{opcode:X2} at EIP=0x{ctx->Eip:X8}");
+                File.AppendAllText("emulator_log.txt", $"i386 UNSUPPORTED: 0x{opcode:X2} at EIP=0x{ctx->Eip:X8} bytes=[{address[0]:X2} {address[1]:X2} {address[2]:X2} {address[3]:X2}]" + Environment.NewLine);
                 return false;
         }
     }
@@ -487,6 +532,238 @@ public static unsafe class EmulatorX86
 
     private static string RegName32(int i) => i switch { 0=>"EAX",1=>"ECX",2=>"EDX",3=>"EBX",4=>"ESP",5=>"EBP",6=>"ESI",7=>"EDI",_=>"?" };
     private static string RegName8(int i) => i switch { 0=>"AL",1=>"CL",2=>"DL",3=>"BL",4=>"AH",5=>"CH",6=>"DH",7=>"BH",_=>"?" };
+
+    // ===================== FS segment prefix (TEB access) =====================
+
+    private static bool HandleFsPrefix(CONTEXT32* ctx, byte* ip, Action<string, int> log)
+    {
+        // Get FS base (TEB address) — on x86 this is the 32-bit TEB
+        uint fsBase = (uint)ThreadInformation.GetCurrentThreadGsBase(); // TEB on both x86 and x64
+
+        byte op = ip[1];
+
+        // MOV r32, FS:[disp32] (64 8B /r with mod=00 rm=101)
+        // MOV r32, FS:[r32+disp] (general form)
+        if (op == 0x8B || op == 0xA1)
+        {
+            if (op == 0xA1) // MOV EAX, FS:[disp32]
+            {
+                uint disp = *(uint*)(ip + 2);
+                uint ea1 = fsBase + disp;
+                ctx->Eax = *(uint*)ea1;
+                log($"MOV EAX, FS:[0x{disp:X}] => 0x{ctx->Eax:X}", 6);
+                ctx->Eip += 6;
+                return true;
+            }
+
+            int offs = 2;
+            byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int reg = (modrm >> 3) & 7; int rm = modrm & 7;
+
+            uint offset;
+            if (mod == 0b00 && rm == 0b101) // [disp32]
+            {
+                offset = *(uint*)(ip + offs); offs += 4;
+            }
+            else
+            {
+                offset = ResolveEA32(ctx, ip, ref offs, mod, rm);
+                offset -= ReadReg32(ctx, rm); // remove base reg, keep only displacement
+                // Actually this is wrong — FS:[reg+disp] means fsBase + reg + disp
+                // Let's redo: the EA was computed as reg+disp, we add fsBase
+                offset = 0; // reset
+                // Re-resolve but we need the raw EA
+                int offs2 = 3; // after prefix + opcode + modrm
+                if (mod == 0b00 && rm == 0b101) { offset = *(uint*)(ip + offs2); }
+                else if (mod == 0b01) { offset = ReadReg32(ctx, rm) + (uint)(int)*(sbyte*)(ip + offs2); }
+                else if (mod == 0b10) { offset = ReadReg32(ctx, rm) + *(uint*)(ip + offs2); }
+                else { offset = ReadReg32(ctx, rm); }
+            }
+
+            uint effectiveAddr = fsBase + offset;
+            *GetReg(ctx, reg) = *(uint*)effectiveAddr;
+            log($"MOV {RegName32(reg)}, FS:[0x{offset:X}] => 0x{*GetReg(ctx, reg):X}", offs);
+            ctx->Eip += (uint)offs;
+            return true;
+        }
+
+        // MOV FS:[disp32], r32 (64 89 /r)
+        if (op == 0x89)
+        {
+            int offs = 2;
+            byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int reg = (modrm >> 3) & 7; int rm = modrm & 7;
+            uint offset;
+            if (mod == 0b00 && rm == 0b101) { offset = *(uint*)(ip + offs); offs += 4; }
+            else { offset = ResolveEA32(ctx, ip, ref offs, mod, rm) - (mod == 0b00 ? 0 : ReadReg32(ctx, rm)); }
+            // Simple approach: resolve EA, add fsBase
+            int offs3 = 3;
+            if (mod == 0b00 && rm == 0b101) { offset = *(uint*)(ip + offs3); }
+            else if (mod == 0b01) { offset = ReadReg32(ctx, rm) + (uint)(int)*(sbyte*)(ip + offs3); }
+            else if (mod == 0b10) { offset = ReadReg32(ctx, rm) + *(uint*)(ip + offs3); }
+            else { offset = ReadReg32(ctx, rm); }
+
+            uint effectiveAddr = fsBase + offset;
+            *(uint*)effectiveAddr = ReadReg32(ctx, reg);
+            log($"MOV FS:[0x{offset:X}], {RegName32(reg)}", offs);
+            ctx->Eip += (uint)offs;
+            return true;
+        }
+
+        File.AppendAllText("emulator_log.txt", $"i386 UNSUPPORTED FS:{op:X2} at EIP=0x{ctx->Eip:X8}" + Environment.NewLine);
+        return false;
+    }
+
+    private static void WriteReg16(CONTEXT32* ctx, int idx, ushort val)
+    {
+        uint* r = GetReg(ctx, idx);
+        *r = (*r & 0xFFFF0000u) | val;
+    }
+    private static ushort ReadReg16(CONTEXT32* ctx, int idx) => (ushort)*GetReg(ctx, idx);
+
+    // ===================== 0x66 prefix (16-bit operand override) =====================
+
+    private static bool Handle66Prefix(CONTEXT32* ctx, byte* ip, Action<string, int> log)
+    {
+        byte op = ip[1];
+
+        switch (op)
+        {
+            // MOV r16, imm16 (66 B8-BF)
+            case >= 0xB8 and <= 0xBF:
+            {
+                int reg = op - 0xB8;
+                ushort imm = *(ushort*)(ip + 2);
+                WriteReg16(ctx, reg, imm);
+                log($"MOV {RegName32(reg)[1..]}X, 0x{imm:X4}", 4);
+                ctx->Eip += 4;
+                return true;
+            }
+
+            // MOV r/m16, r16 (66 89)
+            case 0x89:
+            {
+                int offs = 2;
+                byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int reg = (modrm >> 3) & 7; int rm = modrm & 7;
+                ushort val = ReadReg16(ctx, reg);
+                if (mod == 0b11) WriteReg16(ctx, rm, val);
+                else { uint addr = ResolveEA32(ctx, ip, ref offs, mod, rm); *(ushort*)addr = val; }
+                log($"MOV r/m16, r16", offs);
+                ctx->Eip += (uint)offs;
+                return true;
+            }
+
+            // MOV r16, r/m16 (66 8B)
+            case 0x8B:
+            {
+                int offs = 2;
+                byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int reg = (modrm >> 3) & 7; int rm = modrm & 7;
+                ushort val;
+                if (mod == 0b11) val = ReadReg16(ctx, rm);
+                else { uint addr = ResolveEA32(ctx, ip, ref offs, mod, rm); val = *(ushort*)addr; }
+                WriteReg16(ctx, reg, val);
+                log($"MOV r16, r/m16", offs);
+                ctx->Eip += (uint)offs;
+                return true;
+            }
+
+            // MOV r/m16, imm16 (66 C7 /0)
+            case 0xC7:
+            {
+                int offs = 2;
+                byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int rm = modrm & 7;
+                if (((modrm >> 3) & 7) != 0) return false;
+                uint addr = 0;
+                bool isMem = mod != 0b11;
+                if (isMem) addr = ResolveEA32(ctx, ip, ref offs, mod, rm);
+                ushort imm = *(ushort*)(ip + offs); offs += 2;
+                if (isMem) *(ushort*)addr = imm; else WriteReg16(ctx, rm, imm);
+                log($"MOV r/m16, imm16", offs);
+                ctx->Eip += (uint)offs;
+                return true;
+            }
+
+            // Group1 16-bit (66 83 /r ib, 66 81 /r iw)
+            case 0x83: case 0x81:
+            {
+                int offs = 2;
+                int immSize = op == 0x83 ? 8 : 16;
+                byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int grp = (modrm >> 3) & 7; int rm = modrm & 7;
+                bool isMem = mod != 0b11;
+                uint addr = isMem ? ResolveEA32(ctx, ip, ref offs, mod, rm) : 0;
+                uint dst = isMem ? *(ushort*)addr : ReadReg16(ctx, rm);
+                uint imm;
+                if (immSize == 8) { imm = (uint)(int)*(sbyte*)(ip + offs); offs++; imm &= 0xFFFF; }
+                else { imm = *(ushort*)(ip + offs); offs += 2; }
+                uint result = DoAlu(dst, imm, grp, ctx->EFlags, 16, out uint nf);
+                ctx->EFlags = nf;
+                if (grp != 7) { if (isMem) *(ushort*)addr = (ushort)result; else WriteReg16(ctx, rm, (ushort)result); }
+                log($"{AluNames[grp]} r/m16, imm", offs);
+                ctx->Eip += (uint)offs;
+                return true;
+            }
+
+            // ADD/SUB/CMP/AND/OR/XOR r/m16, r16 (66 01/09/21/29/31/39)
+            case 0x01: case 0x09: case 0x21: case 0x29: case 0x31: case 0x39:
+            {
+                int aluOp = (op >> 3) & 7;
+                int offs = 2;
+                byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int reg = (modrm >> 3) & 7; int rm = modrm & 7;
+                bool isMem = mod != 0b11;
+                uint addr = isMem ? ResolveEA32(ctx, ip, ref offs, mod, rm) : 0;
+                uint dst = isMem ? *(ushort*)addr : ReadReg16(ctx, rm);
+                uint src = ReadReg16(ctx, reg);
+                uint result = DoAlu(dst, src, aluOp, ctx->EFlags, 16, out uint nf);
+                ctx->EFlags = nf;
+                if (aluOp != 7) { if (isMem) *(ushort*)addr = (ushort)result; else WriteReg16(ctx, rm, (ushort)result); }
+                log($"{AluNames[aluOp]} r/m16, r16", offs);
+                ctx->Eip += (uint)offs;
+                return true;
+            }
+
+            // TEST r/m16, r16 (66 85)
+            case 0x85:
+            {
+                int offs = 2;
+                byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int reg = (modrm >> 3) & 7; int rm = modrm & 7;
+                bool isMem = mod != 0b11;
+                uint addr = isMem ? ResolveEA32(ctx, ip, ref offs, mod, rm) : 0;
+                uint dst = isMem ? *(ushort*)addr : ReadReg16(ctx, rm);
+                ctx->EFlags = FlagsCalculator.SetLogicFlags(ctx->EFlags, dst & ReadReg16(ctx, reg), 16);
+                log("TEST r/m16, r16", offs);
+                ctx->Eip += (uint)offs;
+                return true;
+            }
+
+            // 0F two-byte with 66 prefix (SSE2, etc.)
+            case 0x0F:
+            {
+                // Skip the 66 prefix and handle as two-byte
+                ctx->Eip += 1;
+                return Emulate(ctx, ip + 1);
+            }
+
+            // LEA (66 8D) — operand size doesn't affect LEA address calculation
+            case 0x8D:
+            {
+                int offs = 2;
+                byte modrm = ip[offs++]; byte mod = (byte)(modrm >> 6 & 3); int reg = (modrm >> 3) & 7; int rm = modrm & 7;
+                uint ea = ResolveEA32(ctx, ip, ref offs, mod, rm);
+                WriteReg16(ctx, reg, (ushort)ea);
+                log("LEA r16, m", offs);
+                ctx->Eip += (uint)offs;
+                return true;
+            }
+
+            // NOP (66 90)
+            case 0x90:
+                log("NOP16", 2);
+                ctx->Eip += 2;
+                return true;
+
+            default:
+                File.AppendAllText("emulator_log.txt", $"i386 UNSUPPORTED 66 {op:X2} at EIP=0x{ctx->Eip:X8}" + Environment.NewLine);
+                return false;
+        }
+    }
 
     // ===================== 32-bit EA resolution (NO RIP-relative!) =====================
 

@@ -6,12 +6,21 @@ unsafe class Program
 
     static void Main()
     {
-        Console.WriteLine($"Process Architecture: {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}");
+        var processArch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture;
+        Console.WriteLine($"Process Architecture: {processArch}");
 
-        //Run("HelloWorld.bin", Arch.X64);
-        Run("windows-x86_64.bin", Arch.X64);
-        Run("windows-i386.bin", Arch.X86);
-        //Console.ReadLine();
+        switch (processArch)
+        {
+            case System.Runtime.InteropServices.Architecture.X86:
+                Run("windows-i386.bin", Arch.X86);
+                break;
+            case System.Runtime.InteropServices.Architecture.X64:
+                Run("windows-x86_64.bin", Arch.X64);
+                break;
+            default:
+                Console.WriteLine($"Unsupported architecture: {processArch}");
+                break;
+        }
     }
 
     static void Run(string filePath, Arch arch)
