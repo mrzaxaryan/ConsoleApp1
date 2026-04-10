@@ -485,13 +485,14 @@ public static class Rex
     }
     public static unsafe bool HandleGroup2Shift(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool W, bool R, bool X, bool B)
     {
-        if (ip[1] != 0xC1) return false;      // not group-2 imm8
-        int offs = 2;                         // skip REX + 0xC1
+        if (ip[1] != 0xC1 && ip[1] != 0xD3) return false;
+        bool byCL = ip[1] == 0xD3;
+        int offs = 2;                         // skip REX + opcode
         byte modrm = ip[offs++];
         byte mod = (byte)(modrm >> 6 & 3);
         int sub = modrm >> 3 & 7;          // /n selector
         int rm = modrm & 7 | (B ? 8 : 0);
-        byte imm8 = ip[offs++];
+        byte imm8 = byCL ? (byte)(ctx->Rcx & 0x3F) : ip[offs++];
 
         ulong* R64 = &ctx->Rax;
         string opName;
@@ -902,40 +903,111 @@ public static class Rex
         switch (grp)
         {
             case 0: // ADD
-                if (isReg)
                 {
-                    ulong old = *dstReg; *dstReg = old + uimm;
-                    Log($"ADD R{rm}, 0x{(byte)simm8:X2} => 0x{old:X}+0x{uimm:X}=0x{*dstReg:X}", offs);
+                    ulong old = isReg ? *dstReg : *(ulong*)memAddr;
+                    ulong result = old + uimm;
+                    if (isReg) *dstReg = result;
+                    else *(ulong*)memAddr = result;
+                    bool cf = result < old;
+                    bool zf = result == 0;
+                    bool sf = (result & 1UL << 63) != 0;
+                    bool of = ((long)old > 0 && simm8 > 0 && (long)result < 0) || ((long)old < 0 && simm8 < 0 && (long)result >= 0);
+                    bool pf = (System.Numerics.BitOperations.PopCount((uint)(result & 0xFF)) & 1) == 0;
+                    bool af = ((old ^ uimm ^ result) & 0x10) != 0;
+                    uint f = ctx->EFlags & ~0x8D5u;
+                    if (cf) f |= 0x01; if (pf) f |= 0x04; if (af) f |= 0x10;
+                    if (zf) f |= 0x40; if (sf) f |= 0x80; if (of) f |= 0x800;
+                    ctx->EFlags = f;
+                    if (isReg) Log($"ADD R{rm}, 0x{(byte)simm8:X2} => 0x{old:X}+0x{uimm:X}=0x{result:X}", offs);
+                    else Log($"ADD QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => 0x{old:X}+0x{uimm:X}=0x{result:X}", offs);
+                    ctx->Rip += (ulong)offs;
+                    return true;
                 }
-                else
-                {
-                    ulong old = *(ulong*)memAddr; ulong nw = old + uimm; *(ulong*)memAddr = nw;
-                    Log($"ADD QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => 0x{old:X}+0x{uimm:X}=0x{nw:X}", offs);
-                }
-                ctx->Rip += (ulong)offs;
-                return true;
 
             case 5: // SUB
-                if (isReg)
                 {
-                    ulong old = *dstReg; *dstReg = old - uimm;
-                    Log($"SUB R{rm}, 0x{(byte)simm8:X2} => 0x{old:X}-0x{uimm:X}=0x{*dstReg:X}", offs);
+                    ulong old = isReg ? *dstReg : *(ulong*)memAddr;
+                    ulong result = old - uimm;
+                    if (isReg) *dstReg = result;
+                    else *(ulong*)memAddr = result;
+                    bool cf = old < uimm;
+                    bool zf = result == 0;
+                    bool sf = (result & 1UL << 63) != 0;
+                    bool of = ((long)old >= 0 && simm8 < 0 && (long)result < 0) || ((long)old < 0 && simm8 >= 0 && (long)result >= 0);
+                    bool pf = (System.Numerics.BitOperations.PopCount((uint)(result & 0xFF)) & 1) == 0;
+                    bool af = ((old ^ uimm ^ result) & 0x10) != 0;
+                    uint f = ctx->EFlags & ~0x8D5u;
+                    if (cf) f |= 0x01; if (pf) f |= 0x04; if (af) f |= 0x10;
+                    if (zf) f |= 0x40; if (sf) f |= 0x80; if (of) f |= 0x800;
+                    ctx->EFlags = f;
+                    if (isReg) Log($"SUB R{rm}, 0x{(byte)simm8:X2} => 0x{old:X}-0x{uimm:X}=0x{result:X}", offs);
+                    else Log($"SUB QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => 0x{old:X}-0x{uimm:X}=0x{result:X}", offs);
+                    ctx->Rip += (ulong)offs;
+                    return true;
                 }
-                else
+
+            case 4: // AND
                 {
-                    ulong old = *(ulong*)memAddr; ulong nw = old - uimm; *(ulong*)memAddr = nw;
-                    Log($"SUB QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => 0x{old:X}-0x{uimm:X}=0x{nw:X}", offs);
+                    ulong old = isReg ? *dstReg : *(ulong*)memAddr;
+                    ulong result = old & uimm;
+                    if (isReg)
+                    {
+                        *dstReg = result;
+                        Log($"AND R{rm}, 0x{(byte)simm8:X2} => 0x{old:X}&0x{uimm:X}=0x{result:X}", offs);
+                    }
+                    else
+                    {
+                        *(ulong*)memAddr = result;
+                        Log($"AND QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => 0x{old:X}&0x{uimm:X}=0x{result:X}", offs);
+                    }
+                    bool zf = result == 0;
+                    bool sf = (result & 1UL << 63) != 0;
+                    bool pf = (System.Numerics.BitOperations.PopCount((uint)(result & 0xFF)) & 1) == 0;
+                    ctx->EFlags = (ctx->EFlags & ~0x8C5u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u) | (pf ? 0x04u : 0u);
+                    ctx->Rip += (ulong)offs;
+                    return true;
                 }
-                ctx->Rip += (ulong)offs;
-                return true;
+
+            case 1: // OR
+                {
+                    ulong old = isReg ? *dstReg : *(ulong*)memAddr;
+                    ulong result = old | uimm;
+                    if (isReg)
+                    {
+                        *dstReg = result;
+                        Log($"OR R{rm}, 0x{(byte)simm8:X2} => 0x{old:X}|0x{uimm:X}=0x{result:X}", offs);
+                    }
+                    else
+                    {
+                        *(ulong*)memAddr = result;
+                        Log($"OR QWORD PTR [0x{memAddr:X}], 0x{(byte)simm8:X2} => 0x{old:X}|0x{uimm:X}=0x{result:X}", offs);
+                    }
+                    bool zf = result == 0;
+                    bool sf = (result & 1UL << 63) != 0;
+                    bool pf = (System.Numerics.BitOperations.PopCount((uint)(result & 0xFF)) & 1) == 0;
+                    ctx->EFlags = (ctx->EFlags & ~0x8C5u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u) | (pf ? 0x04u : 0u);
+                    ctx->Rip += (ulong)offs;
+                    return true;
+                }
 
             case 7: // CMP
                 {
                     ulong lhs = isReg ? *dstReg : *(ulong*)memAddr;
                     ulong res = lhs - uimm;
+                    bool cf = lhs < uimm;
                     bool zf = res == 0;
                     bool sf = (res & 1UL << 63) != 0;
-                    ctx->EFlags = ctx->EFlags & ~0xC0u | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u);
+                    bool of = ((long)lhs >= 0 && simm8 < 0 && (long)res < 0) || ((long)lhs < 0 && simm8 >= 0 && (long)res >= 0);
+                    bool pf = (System.Numerics.BitOperations.PopCount((uint)(res & 0xFF)) & 1) == 0;
+                    bool af = ((lhs ^ uimm ^ res) & 0x10) != 0;
+                    uint f = ctx->EFlags & ~0x8D5u;
+                    if (cf) f |= 0x01;
+                    if (pf) f |= 0x04;
+                    if (af) f |= 0x10;
+                    if (zf) f |= 0x40;
+                    if (sf) f |= 0x80;
+                    if (of) f |= 0x800;
+                    ctx->EFlags = f;
 
                     if (isReg)
                         Log($"CMP R{rm}, 0x{(byte)simm8:X2} => (R{rm}=0x{lhs:X})", offs);
@@ -1774,6 +1846,72 @@ public static class Rex
 
         Log($"CMP R{reg}, {srcDesc} => result=0x{result:X16} "
             + $"[ZF={(f & ZF) != 0}, SF={(f & SF) != 0}, CF={(f & CF) != 0}, OF={(f & OF) != 0}, PF={(f & PF) != 0}, AF={(f & AF) != 0}]", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    // REX + 88 /r → MOV r/m8, r8
+    public static unsafe bool HandleMovRm8R8(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool W, bool R, bool X, bool B)
+    {
+        if (ip[1] != 0x88) return false;
+
+        int offs = 2;
+        byte modrm = ip[offs++];
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7 | (R ? 8 : 0);
+        int rm = modrm & 7 | (B ? 8 : 0);
+
+        ulong* Regs = &ctx->Rax;
+        byte value = (byte)Regs[reg];
+        string dstDesc;
+
+        if (mod == 0b11)
+        {
+            byte* dst = (byte*)(Regs + rm);
+            *dst = value;
+            dstDesc = $"R{rm}b";
+        }
+        else
+        {
+            ulong addr = ResolveEA_Rex(ctx, ip, ref offs, mod, rm, X, B, out dstDesc);
+            *(byte*)addr = value;
+        }
+
+        Log($"MOV {dstDesc}, R{reg}b => 0x{value:X2}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
+
+    // REX + 8A /r → MOV r8, r/m8
+    public static unsafe bool HandleMovR8Rm8(CONTEXT* ctx, byte* ip, Action<string, int> Log, bool W, bool R, bool X, bool B)
+    {
+        if (ip[1] != 0x8A) return false;
+
+        int offs = 2;
+        byte modrm = ip[offs++];
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7 | (R ? 8 : 0);
+        int rm = modrm & 7 | (B ? 8 : 0);
+
+        ulong* Regs = &ctx->Rax;
+        byte value;
+        string srcDesc;
+
+        if (mod == 0b11)
+        {
+            value = (byte)Regs[rm];
+            srcDesc = $"R{rm}b";
+        }
+        else
+        {
+            ulong addr = ResolveEA_Rex(ctx, ip, ref offs, mod, rm, X, B, out srcDesc);
+            value = *(byte*)addr;
+        }
+
+        byte* dst = (byte*)(Regs + reg);
+        *dst = value;
+
+        Log($"MOV R{reg}b, {srcDesc} => 0x{value:X2}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }

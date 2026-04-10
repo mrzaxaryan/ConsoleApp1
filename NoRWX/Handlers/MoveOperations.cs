@@ -32,10 +32,37 @@ public static unsafe class MoveOperations
 
         if (mod == 0b00 && rm == 5)
         {
-            // [disp32]
+            // RIP-relative [RIP + disp32]
             disp = *(int*)(ip + offs);
             offs += 4;
-            addr = (ulong)disp;
+            addr = ctx->Rip + (ulong)offs + (ulong)(long)disp;
+        }
+        else if (rm == 4) // SIB byte follows
+        {
+            byte sib = ip[offs++];
+            int basReg = sib & 7;
+            int idxReg = sib >> 3 & 7;
+            int scale = sib >> 6;
+
+            ulong baseVal = (mod == 0b00 && basReg == 5) ? 0 : R64[basReg];
+            ulong indexVal = (idxReg == 4) ? 0 : R64[idxReg] << scale;
+            addr = baseVal + indexVal;
+
+            if (mod == 0b00 && basReg == 5)
+            {
+                disp = *(int*)(ip + offs); offs += 4;
+                addr += (ulong)(long)disp;
+            }
+            else if (mod == 0b01)
+            {
+                disp = *(sbyte*)(ip + offs); offs += 1;
+                addr += (ulong)(long)disp;
+            }
+            else if (mod == 0b10)
+            {
+                disp = *(int*)(ip + offs); offs += 4;
+                addr += (ulong)(long)disp;
+            }
         }
         else
         {
@@ -52,7 +79,7 @@ public static unsafe class MoveOperations
                 offs += 4;
             }
 
-            addr += (ulong)disp;
+            addr += (ulong)(long)disp;
         }
 
         *(uint*)addr = src;

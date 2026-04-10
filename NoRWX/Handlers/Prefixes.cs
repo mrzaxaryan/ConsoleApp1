@@ -286,6 +286,20 @@ public static unsafe class Prefixes
         if (op == 0x39) return HandleCmpEvGv16(ctx, ip, Log);        // CMP r/m16, r16
         if (op == 0x85) return HandleTestRmR(ctx, ip, 16, Log);      // TEST r/m16, r16
 
+        // ---- 66 B8+r → MOV r16, imm16 ----
+        if (op is >= 0xB8 and <= 0xBF)
+        {
+            bool REX_B = (rex & 0x01) != 0;
+            int reg = (op - 0xB8) | (REX_B ? 8 : 0);
+            ushort imm16 = *(ushort*)(ip + offs);
+            offs += 2;
+            ulong* R64 = &ctx->Rax;
+            *(ushort*)(R64 + reg) = imm16;
+            Log($"MOV R{reg}w, 0x{imm16:X4}", offs);
+            ctx->Rip += (ulong)offs;
+            return true;
+        }
+
         Log($"Unhandled 0x66-prefixed opcode 0x{op:X2}", 2);
         return false;
     }
@@ -827,51 +841,62 @@ public static unsafe class Prefixes
 
         byte* next = address + 1;
 
-        // Case 1: 65 48 8B 04 25 <disp32> → MOV RAX, [GS:disp32]
-        if (*next == 0x48 && *(next + 1) == 0x8B && *(next + 2) == 0x04 && *(next + 3) == 0x25)
-        {
-            uint disp32 = *(uint*)(next + 4);   // read displacement
-            ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
-            ulong addr = tebBase + disp32;
-            ulong value = *(ulong*)addr;
+        // Parse optional REX prefix after GS
+        int offs = 1;
+        byte rex = 0;
+        if ((address[offs] & 0xF0) == 0x40)
+            rex = address[offs++];
 
-            ctx->Rax = value;
-            Log($"MOV RAX, [GS:0x{disp32:X}] => RAX=0x{value:X} (TEB base=0x{tebBase:X})", 9);
-            ctx->Rip += 9;
+        bool REX_W = (rex & 0x08) != 0;
+        bool REX_R = (rex & 0x04) != 0;
+        bool REX_X = (rex & 0x02) != 0;
+        bool REX_B = (rex & 0x01) != 0;
+
+        byte gsOp = address[offs++];
+
+        // GS: MOV r64, [GS:...] (opcode 0x8B with REX.W)
+        if (gsOp == 0x8B && REX_W)
+        {
+            byte modrm = address[offs++];
+            byte mod = (byte)(modrm >> 6 & 3);
+            int reg = modrm >> 3 & 7 | (REX_R ? 8 : 0);
+            int rm = modrm & 7 | (REX_B ? 8 : 0);
+
+            ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
+            ulong memAddr;
+
+            if (mod == 0b00 && (modrm & 7) == 0b100 && address[offs] == 0x25)
+            {
+                // SIB with abs disp32: [GS:disp32] (e.g., 8B 04 25 60 00 00 00)
+                offs++; // skip SIB
+                uint disp32 = *(uint*)(address + offs); offs += 4;
+                memAddr = tebBase + disp32;
+            }
+            else if (mod == 0b00)
+            {
+                ulong regVal = *(&ctx->Rax + rm);
+                memAddr = tebBase + regVal;
+            }
+            else if (mod == 0b01)
+            {
+                ulong regVal = *(&ctx->Rax + rm);
+                sbyte disp8 = *(sbyte*)(address + offs); offs++;
+                memAddr = tebBase + regVal + (ulong)(long)disp8;
+            }
+            else
+            {
+                Log("Unhandled GS-prefixed MOV addressing mode", offs);
+                return false;
+            }
+
+            ulong value = *(ulong*)memAddr;
+            *(&ctx->Rax + reg) = value;
+            Log($"MOV R{reg}, [GS:0x{memAddr - tebBase:X}] => R{reg}=0x{value:X} (GS=0x{tebBase:X})", offs);
+            ctx->Rip += (ulong)offs;
             return true;
         }
 
-        // Case 2: 65 48 8B /r (register-based addressing, no disp32)
-        if (*next == 0x48 && *(next + 1) == 0x8B)
-        {
-            byte prefix = *address; // 0x65 (GS)
-                                    //    if (prefix != 0x65)
-                                    //        return false;
-                                    // 65 48 8B 00  => MOV RAX, [GS:RAX]
-                                    // General pattern: 65 48 8B /r (modrm with mod==00)
-            if (*next == 0x48 && *(next + 1) == 0x8B)
-            {
-                byte modrm = *(next + 2);
-                byte mod = (byte)(modrm >> 6 & 3);
-                byte reg = (byte)(modrm >> 3 & 7);
-                byte rm = (byte)(modrm & 7);
-
-                if (mod == 0) // no displacement
-                {
-                    ulong tebBase = ThreadInformation.GetCurrentThreadGsBase();
-                    var offset = (&ctx->Rax)[rm];
-                    ulong addr = tebBase + offset;
-                    ulong value = *(ulong*)addr;
-                    (&ctx->Rax)[reg] = value;
-
-                    Log($"MOV R{reg}, [GS:R{rm}] => R{reg}=0x{value:X} (addr=0x{addr:X}, GS=0x{tebBase:X})", 4);
-                    ctx->Rip += 4;
-                    return true;
-                }
-            }
-        }
-
-        Log("Unhandled GS-prefixed opcode", 8);
+        Log("Unhandled GS-prefixed opcode", offs);
         return false;
     }
 }

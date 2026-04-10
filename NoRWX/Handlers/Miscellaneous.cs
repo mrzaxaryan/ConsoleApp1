@@ -197,12 +197,45 @@ public static unsafe class Miscellaneous
     }
     public static unsafe ulong ResolveEA_NoRex_BaseDispOrRip(CONTEXT* ctx, byte* ip, ref int offs, byte mod, int rm, out string desc)
     {
+        ulong* R64 = &ctx->Rax;
+
         // mod=00 & rm=101 → RIP+disp32
         if (mod == 0b00 && rm == 0b101)
         {
             int disp32 = *(int*)(ip + offs); offs += 4;
             ulong addr = ctx->Rip + (ulong)offs + (ulong)disp32;
             desc = $"[RIP+0x{disp32:X}]";
+            return addr;
+        }
+
+        // SIB byte (rm == 4)
+        if (rm == 0b100)
+        {
+            byte sib = ip[offs++];
+            int basReg = sib & 7;
+            int idxReg = sib >> 3 & 7;
+            int scale = sib >> 6;
+
+            ulong baseVal = (mod == 0b00 && basReg == 5) ? 0 : R64[basReg];
+            ulong indexVal = (idxReg == 4) ? 0 : R64[idxReg] << scale;
+            ulong addr = baseVal + indexVal;
+
+            if (mod == 0b00 && basReg == 5)
+            {
+                int d32 = *(int*)(ip + offs); offs += 4;
+                addr += (ulong)(long)d32;
+            }
+            else if (mod == 0b01)
+            {
+                sbyte d8 = *(sbyte*)(ip + offs); offs += 1;
+                addr += (ulong)(long)d8;
+            }
+            else if (mod == 0b10)
+            {
+                int d32 = *(int*)(ip + offs); offs += 4;
+                addr += (ulong)(long)d32;
+            }
+            desc = $"[0x{addr:X}]";
             return addr;
         }
 

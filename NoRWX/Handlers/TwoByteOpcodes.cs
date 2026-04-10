@@ -130,4 +130,65 @@ public static unsafe class TwoByteOpcodes
             return true;
         }
     }
+
+    // [REX?] 0F 4x /r → CMOVcc r32/r64, r/m32/r/m64
+    public static unsafe bool HandleCmovcc(CONTEXT* ctx, byte* ip, Action<string, int> Log)
+    {
+        int offs = 0;
+        byte rex = 0;
+        if ((ip[offs] & 0xF0) == 0x40)
+            rex = ip[offs++];
+        bool W = (rex & 0x08) != 0;
+        bool REX_R = (rex & 0x04) != 0;
+        bool REX_X = (rex & 0x02) != 0;
+        bool REX_B = (rex & 0x01) != 0;
+
+        if (ip[offs++] != 0x0F) return false;
+        byte opcode = ip[offs++];
+        if (opcode < 0x40 || opcode > 0x4F) return false;
+
+        byte modrm = ip[offs++];
+        byte mod = (byte)(modrm >> 6 & 3);
+        int reg = modrm >> 3 & 7 | (REX_R ? 8 : 0);
+        int rm = modrm & 7 | (REX_B ? 8 : 0);
+        ulong* R = &ctx->Rax;
+
+        ulong src;
+        if (mod == 0b11)
+            src = W ? R[rm] : (uint)R[rm];
+        else
+        {
+            ulong addr = Rex.ResolveEA_Rex(ctx, ip, ref offs, mod, rm, REX_X, REX_B, out _);
+            src = W ? *(ulong*)addr : *(uint*)addr;
+        }
+
+        uint flags = ctx->EFlags;
+        bool cf = (flags & 1) != 0;
+        bool zf = (flags & 0x40) != 0;
+        bool sf = (flags & 0x80) != 0;
+        bool of = (flags & 0x800) != 0;
+        bool pf = (flags & 4) != 0;
+
+        bool cond = opcode switch
+        {
+            0x40 => of,              0x41 => !of,
+            0x42 => cf,              0x43 => !cf,
+            0x44 => zf,              0x45 => !zf,
+            0x46 => cf || zf,        0x47 => !cf && !zf,
+            0x48 => sf,              0x49 => !sf,
+            0x4A => pf,              0x4B => !pf,
+            0x4C => sf != of,        0x4D => sf == of,
+            0x4E => zf || sf != of,  0x4F => !zf && sf == of,
+            _ => false
+        };
+
+        if (cond)
+            R[reg] = W ? src : (uint)src;
+
+        string[] names = ["CMOVO","CMOVNO","CMOVB","CMOVAE","CMOVE","CMOVNE","CMOVBE","CMOVA",
+                          "CMOVS","CMOVNS","CMOVP","CMOVNP","CMOVL","CMOVGE","CMOVLE","CMOVG"];
+        Log($"{names[opcode - 0x40]} R{reg}, R{rm} => {(cond ? "moved" : "not moved")}", offs);
+        ctx->Rip += (ulong)offs;
+        return true;
+    }
 }

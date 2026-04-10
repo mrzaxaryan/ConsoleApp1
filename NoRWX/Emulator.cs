@@ -21,7 +21,7 @@ public static unsafe class Emulator
             var afterSnap = RegSnapshot.FromContext(ctx);
             string diff = FormatRegisterDiff(before, afterSnap);
             string log = $"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}";
-            Console.WriteLine(log);
+            //Console.WriteLine(log);
             //File.AppendAllText("emulator_log.txt", log + Environment.NewLine);
         }
 
@@ -120,10 +120,7 @@ public static unsafe class Emulator
                 return ALUOperations.HandleTestEwGw(ctx, address, Log);
             case X64Opcodes.OPSIZE_PREFIX:
                 return Prefixes.HandleOperandSizePrefix(ctx, address, Log);
-            case X64Opcodes.REX_PREFIX:
-            case X64Opcodes.REX_B_GROUP:
-            case X64Opcodes.REX_R_GROUP:
-            case X64Opcodes.REX_W_GROUP:
+            case >= 0x40 and <= 0x4F:
                 {
                     byte next = *(address + 1);
                     if (next == 0x83) // REX.W prefixed ADD r/m64, imm8
@@ -171,6 +168,98 @@ public static unsafe class Emulator
 
                     if (Rex.HandleTestRm64R64(ctx, address, Log, W, R, X, B, op2)) return true;
                     if (Rex.HandleMovsxdRm32R64(ctx, address, Log, op2)) return true;
+                    if (Rex.HandleMovRm8R8(ctx, address, Log, W, R, X, B)) return true;   // REX 88 /r
+                    if (Rex.HandleMovR8Rm8(ctx, address, Log, W, R, X, B)) return true;   // REX 8A /r
+
+                    // REX + B0-B7: MOV r8, imm8 (with REX.B extending register)
+                    if (op2 is >= 0xB0 and <= 0xB7)
+                    {
+                        int reg = (op2 - 0xB0) | (B ? 8 : 0);
+                        byte imm8 = *(address + 2);
+                        byte* dst = (byte*)(&ctx->Rax + reg);
+                        *dst = imm8;
+                        Log($"MOV R{reg}b, 0x{imm8:X2}", 3);
+                        ctx->Rip += 3;
+                        return true;
+                    }
+
+                    // OR r64, r/m64 (0x0B with REX.W)
+                    if (W && op2 == 0x0B)
+                    {
+                        int offs2 = 2;
+                        byte modrm = *(address + offs2++);
+                        byte mod2 = (byte)(modrm >> 6 & 3);
+                        int reg2 = modrm >> 3 & 7 | (R ? 8 : 0);
+                        int rm2 = modrm & 7 | (B ? 8 : 0);
+                        ulong* Regs = &ctx->Rax;
+                        ulong src;
+                        if (mod2 == 0b11) src = Regs[rm2];
+                        else { ulong addr2 = Rex.ResolveEA_Rex(ctx, address, ref offs2, mod2, rm2, X, B, out _); src = *(ulong*)addr2; }
+                        ulong old = Regs[reg2];
+                        ulong result = old | src;
+                        Regs[reg2] = result;
+                        bool zf = result == 0; bool sf = (result & 1UL << 63) != 0;
+                        bool pf = (System.Numerics.BitOperations.PopCount((uint)(result & 0xFF)) & 1) == 0;
+                        ctx->EFlags = (ctx->EFlags & ~0x8C5u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u) | (pf ? 0x04u : 0u);
+                        Log($"OR R{reg2}, R{rm2} => 0x{old:X}|0x{src:X}=0x{result:X}", offs2);
+                        ctx->Rip += (ulong)offs2;
+                        return true;
+                    }
+
+                    // REX + 0F xx (two-byte opcodes with REX prefix)
+                    if (op2 == 0x0F)
+                    {
+                        byte op3b = *(address + 2);
+                        // MOVZX r32, r/m16 (0F B7) / MOVZX r32, r/m8 (0F B6) with REX
+                        if (op3b == 0xB7 || op3b == 0xB6)
+                        {
+                            int offs2 = 3;
+                            byte modrm = *(address + offs2++);
+                            byte mod2 = (byte)(modrm >> 6 & 3);
+                            int reg2 = modrm >> 3 & 7 | (R ? 8 : 0);
+                            int rm2 = modrm & 7 | (B ? 8 : 0);
+                            ulong* Regs = &ctx->Rax;
+                            ulong val;
+                            if (mod2 == 0b11)
+                                val = op3b == 0xB6 ? (byte)Regs[rm2] : (ushort)Regs[rm2];
+                            else
+                            {
+                                ulong addr2 = Rex.ResolveEA_Rex(ctx, address, ref offs2, mod2, rm2, X, B, out _);
+                                val = op3b == 0xB6 ? *(byte*)addr2 : *(ushort*)addr2;
+                            }
+                            Regs[reg2] = val; // zero-extend to 64
+                            string width = op3b == 0xB6 ? "byte" : "word";
+                            Log($"MOVZX R{reg2}, {width} => 0x{val:X}", offs2);
+                            ctx->Rip += (ulong)offs2;
+                            return true;
+                        }
+                        // SETcc with REX
+                        if (op3b is >= 0x90 and <= 0x9F)
+                            return TwoByteOpcodes.HandleSetcc(ctx, address, Log);
+                        // MOVSX r32, r/m8 (0F BE) with REX
+                        if (op3b == 0xBE)
+                        {
+                            int offs2 = 3;
+                            byte modrm = *(address + offs2++);
+                            byte mod2 = (byte)(modrm >> 6 & 3);
+                            int reg2 = modrm >> 3 & 7 | (R ? 8 : 0);
+                            int rm2 = modrm & 7 | (B ? 8 : 0);
+                            ulong* Regs = &ctx->Rax;
+                            sbyte val;
+                            if (mod2 == 0b11)
+                                val = (sbyte)(byte)Regs[rm2];
+                            else
+                            {
+                                ulong addr2 = Rex.ResolveEA_Rex(ctx, address, ref offs2, mod2, rm2, X, B, out _);
+                                val = *(sbyte*)addr2;
+                            }
+                            if (W) Regs[reg2] = (ulong)(long)val; // sign-extend to 64
+                            else Regs[reg2] = (uint)(int)val;     // sign-extend to 32, zero-extend to 64
+                            Log($"MOVSX R{reg2}, byte => 0x{Regs[reg2]:X}", offs2);
+                            ctx->Rip += (ulong)offs2;
+                            return true;
+                        }
+                    }
 
                     if (Rex.HandleCdqe(ctx, address, Log, W, op2)) return true; // 48 98
                     if (Rex.HandleCqo(ctx, address, Log, W, op2)) return true;  // 48 99
@@ -178,6 +267,26 @@ public static unsafe class Emulator
                     if (Rex.HandleCmpGvEv(ctx, address, Log, R, X, B, op2)) return true; // 48 3B /r
 
                     if (op2 == 0x31) return Rex.HandleXorRm64R64(ctx, address, Log);
+
+                    // IMUL r64, r/m64, imm8 (6B /r ib)
+                    if (op2 == 0x6B)
+                    {
+                        int offs2 = 2;
+                        byte modrm = *(address + offs2++);
+                        byte mod2 = (byte)(modrm >> 6 & 3);
+                        int reg2 = modrm >> 3 & 7 | (R ? 8 : 0);
+                        int rm2 = modrm & 7 | (B ? 8 : 0);
+                        ulong* Regs = &ctx->Rax;
+                        long src;
+                        if (mod2 == 0b11) src = (long)Regs[rm2];
+                        else { ulong addr2 = Rex.ResolveEA_Rex(ctx, address, ref offs2, mod2, rm2, X, B, out _); src = W ? *(long*)addr2 : *(int*)addr2; }
+                        sbyte imm = *(sbyte*)(address + offs2++);
+                        long result = src * imm;
+                        Regs[reg2] = (ulong)result;
+                        Log($"IMUL R{reg2}, R{rm2}, 0x{(byte)imm:X2} => 0x{(ulong)result:X}", offs2);
+                        ctx->Rip += (ulong)offs2;
+                        return true;
+                    }
 
                     // fallback
                     Log($"Unsupported REX-prefixed opcode 0x{rex:X2} 0x{op2:X2} 0x{op3:X2}", 3);
@@ -204,8 +313,10 @@ public static unsafe class Emulator
                         case >= 0x80 and <= 0x8F: return ControlFlow.HandleTwoByteConditionalJump(ctx, address, Log); //DDD
                         case 0xB6: return ControlFlow.HandleMovzxGvEb32(ctx, address, Log);   // MOVZX r32, r/m8
                         case 0xB7: return ControlFlow.HandleMovzxGvEw32(ctx, address, Log);   // MOVZX r32, r/m16
-                        case X64Opcodes.SETE: return TwoByteOpcodes.HandleSetcc(ctx, address, Log);
+                        case >= 0x90 and <= 0x9F: return TwoByteOpcodes.HandleSetcc(ctx, address, Log);
                         case 0xBE: return ControlFlow.HandleMovsxGvEb32(ctx, address, Log);
+                        case >= 0x40 and <= 0x4F: // CMOVcc r32, r/m32
+                            return TwoByteOpcodes.HandleCmovcc(ctx, address, Log);
                         default:
                             Log($"Unsupported opcode 0x{opcode:X2}", 32);
                             return false;
@@ -217,11 +328,37 @@ public static unsafe class Emulator
             case X64Opcodes.MOV_R32_RM32: return MoveOperations.HandleMovR32Rm32(ctx, address, Log);
             case X64Opcodes.MOV_RM8_IMM8: return MoveOperations.HandleMovRm8Imm8(ctx, address, Log);
 
+            // MOV r8, imm8 (B0–B7)
+            case >= 0xB0 and <= 0xB7:
+                {
+                    int reg = opcode - 0xB0;
+                    byte imm8 = *(address + 1);
+                    byte* dst = (byte*)(&ctx->Rax + reg);
+                    *dst = imm8;
+                    Log($"MOV R{reg}b, 0x{imm8:X2}", 2);
+                    ctx->Rip += 2;
+                    return true;
+                }
             // MOV r64, imm64 (B8–BF)
             case >= X64Opcodes.MOV_RAX_IMM64 and <= X64Opcodes.MOV_RDI_IMM64:
                 return MoveOperations.HandleMovImmToReg(ctx, address, Log);
+            // LEA r32, m (8D /r without REX)
+            case 0x8D:
+                {
+                    int offs2 = 1;
+                    byte modrm = *(address + offs2++);
+                    byte mod2 = (byte)(modrm >> 6 & 3);
+                    int reg2 = modrm >> 3 & 7;
+                    int rm2 = modrm & 7;
+                    ulong addr2 = Miscellaneous.ResolveEA_NoRex_BaseDispOrRip(ctx, address, ref offs2, mod2, rm2, out _);
+                    (&ctx->Rax)[reg2] = (uint)addr2; // 32-bit LEA zero-extends
+                    Log($"LEA R{reg2}d, [0x{addr2:X}]", offs2);
+                    ctx->Rip += (ulong)offs2;
+                    return true;
+                }
             // Arithmetic and logic operations
             case X64Opcodes.ADD_R32_RM32: return ALUOperations.HandleAddGvEv(ctx, address, Log);
+            case 0x31: return ALUOperations.HandleXorRvEv(ctx, address, Log);    // XOR r/m32, r32
             case X64Opcodes.XOR_R32_RM32: return ALUOperations.HandleXorRvEv(ctx, address, Log);
             case X64Opcodes.ADD_RM8_R8: return ALUOperations.HandleAddRm8R8(ctx, address, Log);
             case X64Opcodes.TEST_RM8_R8: return ALUOperations.HandleTestRm8R8(ctx, address, Log);
@@ -235,6 +372,20 @@ public static unsafe class Emulator
 
             case X64Opcodes.CMP_AL_IMM8:
                 return Miscellaneous.HandleCmpAlImm8(ctx, address, Log);
+
+            case 0xA8: // TEST AL, imm8
+                {
+                    byte imm8 = *(address + 1);
+                    byte al = (byte)ctx->Rax;
+                    byte result = (byte)(al & imm8);
+                    bool zf = result == 0;
+                    bool sf = (result & 0x80) != 0;
+                    bool pf = (System.Numerics.BitOperations.PopCount(result) & 1) == 0;
+                    ctx->EFlags = (ctx->EFlags & ~0x8C5u) | (zf ? 0x40u : 0u) | (sf ? 0x80u : 0u) | (pf ? 0x04u : 0u);
+                    Log($"TEST AL, 0x{imm8:X2} => 0x{result:X2} [ZF={zf}]", 2);
+                    ctx->Rip += 2;
+                    return true;
+                }
 
             case X64Opcodes.CMP_RM32_R32:
                 return Miscellaneous.HandleCmpEvGv32(ctx, address, Log);
