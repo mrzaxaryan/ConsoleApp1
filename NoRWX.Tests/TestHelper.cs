@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using static NoRWX.Emulator;
+using static NoRWX.EmulatorX64;
 
 namespace NoRWX.Tests;
 

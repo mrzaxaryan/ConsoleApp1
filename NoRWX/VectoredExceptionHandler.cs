@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using static NoRWX.Emulator;
+using static NoRWX.EmulatorX64;
 
 namespace NoRWX;
 
@@ -13,6 +13,7 @@ public static unsafe class VectoredExceptionHandler
     private static nint executingCodeAddress = nint.Zero;
     private static nuint executingCodeSize = nuint.Zero;
     private static bool isArm64Emulated = false;
+    private static bool is32BitMode = false;
     private static ExceptionHandlerDelegate? handlerDelegate;
     private static GCHandle handlerDelegateHandle;
 
@@ -84,27 +85,61 @@ public static unsafe class VectoredExceptionHandler
 
         if (isOurException && IsInCodeRegion(rip))
         {
-            // Emulate instructions in a tight loop while RIP stays in our code
-            // region. This avoids the massive overhead of returning to the OS
-            // after every single instruction (~10,000+ cycles per exception).
-            // The loop exits when RIP leaves the region (external API call)
-            // or emulation fails.
-            while (IsInCodeRegion(ctx->Rip))
+            if (is32BitMode)
             {
-                if (!Emulate(ref exceptionInfo, (byte*)ctx->Rip))
+                // i386 emulation: use the 32-bit emulator with a CONTEXT32 view
+                var ctx32 = new EmulatorX86.CONTEXT32
                 {
-                    if (!isArm64Emulated)
-                        ResetHardwareBreakpoint(ctx);
+                    Eax = (uint)ctx->Rax, Ecx = (uint)ctx->Rcx,
+                    Edx = (uint)ctx->Rdx, Ebx = (uint)ctx->Rbx,
+                    Esp = (uint)ctx->Rsp, Ebp = (uint)ctx->Rbp,
+                    Esi = (uint)ctx->Rsi, Edi = (uint)ctx->Rdi,
+                    Eip = (uint)ctx->Rip, EFlags = ctx->EFlags,
+                };
+
+                while (IsInCodeRegion(ctx32.Eip))
+                {
+                    if (!EmulatorX86.Emulate(&ctx32, (byte*)(ulong)ctx32.Eip))
+                    {
+                        if (!isArm64Emulated) ResetHardwareBreakpoint(ctx);
+                        return EXCEPTION_CONTINUE_SEARCH;
+                    }
+                }
+
+                // Write back to 64-bit context
+                ctx->Rax = ctx32.Eax; ctx->Rcx = ctx32.Ecx;
+                ctx->Rdx = ctx32.Edx; ctx->Rbx = ctx32.Ebx;
+                ctx->Rsp = ctx32.Esp; ctx->Rbp = ctx32.Ebp;
+                ctx->Rsi = ctx32.Esi; ctx->Rdi = ctx32.Edi;
+                ctx->Rip = ctx32.Eip; ctx->EFlags = ctx32.EFlags;
+            }
+            else if (isArm64Emulated)
+            {
+                // ARM64/Prism: must emulate one instruction per exception
+                if (!Emulate(ref exceptionInfo, (byte*)rip))
                     return EXCEPTION_CONTINUE_SEARCH;
+            }
+            else
+            {
+                // Native x64: emulate in a tight loop
+                while (IsInCodeRegion(ctx->Rip))
+                {
+                    if (!Emulate(ref exceptionInfo, (byte*)ctx->Rip))
+                    {
+                        ResetHardwareBreakpoint(ctx);
+                        return EXCEPTION_CONTINUE_SEARCH;
+                    }
                 }
             }
 
-            // RIP left the code region (external API call).
-            // Let it run natively. On native x64 set a hardware breakpoint
-            // on the return address so we resume when the call returns.
-            // On ARM64, the return into non-executable memory will fault naturally.
+            // RIP/EIP left the code region — set up for re-entry
             if (!isArm64Emulated)
-                SetHardwareBreakpoint(ctx, (void*)*(ulong*)ctx->Rsp);
+            {
+                if (is32BitMode)
+                    SetHardwareBreakpoint(ctx, (void*)*(uint*)ctx->Rsp);
+                else
+                    SetHardwareBreakpoint(ctx, (void*)*(ulong*)ctx->Rsp);
+            }
 
             return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -112,6 +147,13 @@ public static unsafe class VectoredExceptionHandler
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
+
+    /// <summary>Initialize for 32-bit i386 code emulation.</summary>
+    public static void Initialize32(nint codeAddr, nuint codeSize)
+    {
+        is32BitMode = true;
+        Initialize(codeAddr, codeSize);
+    }
 
     public static void Initialize(nint codeAddr, nuint codeSize)
     {

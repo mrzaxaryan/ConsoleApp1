@@ -6,7 +6,7 @@ using System.Text;
 
 namespace NoRWX;
 
-public static unsafe class Emulator
+public static unsafe class EmulatorX64
 {
     // Cached no-op delegate — avoids allocating a new closure on every instruction
     private static readonly Action<string, int> _noopLog = static (_, _) => { };

@@ -1,5 +1,5 @@
 using NoRWX.Core;
-using static NoRWX.Emulator;
+using static NoRWX.EmulatorX64;
 
 namespace NoRWX.Handlers;
 
