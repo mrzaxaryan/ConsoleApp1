@@ -2,6 +2,7 @@ using NoRWX.Core;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
 
 namespace NoRWX;
 
@@ -347,8 +348,9 @@ public static unsafe class EmulatorARM64
         // Use bits[28:23] to determine the specific DP-immediate sub-group.
         int fixed6 = (int)(instr >> 23) & 0x3F;
 
-        // PC-rel addressing: bit28=0 (ADR if bit31=0, ADRP if bit31=1)
-        if ((fixed6 & 0x20) == 0) // bit28=0
+        // PC-rel addressing: bits[28:24] = 10000 → fixed6[5:1] matches x0000x
+        // ADR: bit31=0, ADRP: bit31=1. Check: bits[28:24] of instr = 10000
+        if (((instr >> 24) & 0x1F) == 0b10000)
         {
             bool isAdrp = (instr >> 31) != 0;
             int immlo = (int)(instr >> 29) & 3;
@@ -501,7 +503,7 @@ public static unsafe class EmulatorARM64
         {
             bool isLink = ((instr >> 31) & 1) != 0;
             int imm26 = (int)(instr & 0x3FFFFFF);
-            long offset = ((long)(imm26 << 6)) >> 4; // sign-extend and *4
+            long offset = (((long)imm26 << 38) >> 36); // sign-extend and *4
 
             if (isLink) ctx->X30 = ctx->Pc + 4;
             ctx->Pc = (ulong)((long)ctx->Pc + offset);
@@ -512,7 +514,7 @@ public static unsafe class EmulatorARM64
         {
             int cond = (int)(instr & 0xF);
             int imm19 = (int)(instr >> 5) & 0x7FFFF;
-            long offset = ((long)(imm19 << 45)) >> 43; // sign-extend and *4
+            long offset = (((long)imm19 << 45) >> 43); // sign-extend and *4
 
             ctx->Pc = EvalCond(ctx, cond) ? (ulong)((long)ctx->Pc + offset) : ctx->Pc + 4;
             return true;
@@ -523,7 +525,7 @@ public static unsafe class EmulatorARM64
             bool sf = (instr >> 31) != 0;
             bool isNZ = ((instr >> 24) & 1) != 0;
             int imm19 = (int)(instr >> 5) & 0x7FFFF;
-            long offset = ((long)(imm19 << 45)) >> 43;
+            long offset = (((long)imm19 << 45) >> 43);
             int rt = (int)(instr & 0x1F);
 
             ulong val = sf ? ReadX(ctx, rt) : ReadW(ctx, rt);
@@ -539,7 +541,7 @@ public static unsafe class EmulatorARM64
             int b40 = (int)(instr >> 19) & 0x1F;
             int bit = (b5 << 5) | b40;
             int imm14 = (int)(instr >> 5) & 0x3FFF;
-            long offset = ((long)(imm14 << 50)) >> 48;
+            long offset = (((long)imm14 << 50) >> 48); // sign-extend and multiply by 4
             int rt = (int)(instr & 0x1F);
 
             bool bitSet = ((ReadX(ctx, rt) >> bit) & 1) != 0;
@@ -678,7 +680,11 @@ public static unsafe class EmulatorARM64
             {
                 uint imm12 = (instr >> 10) & 0xFFF;
                 ulong offset = (ulong)imm12 << size;
-                ulong addr = ReadXSp(ctx, rn) + offset;
+                ulong baseVal = ReadXSp(ctx, rn);
+                ulong addr = baseVal + offset;
+
+                if (EmulatorLogger.IsEnabled)
+                    EmulatorLogger.Log($"  LDR/STR: base=X{rn}=0x{baseVal:X} + 0x{offset:X} = 0x{addr:X} size={accessBytes} load={isLoad} rt=X{rt}");
 
                 if (isLoad || isSigned)
                 {
@@ -708,6 +714,8 @@ public static unsafe class EmulatorARM64
                         };
                     }
                     WriteX(ctx, rt, val);
+                    if (EmulatorLogger.IsEnabled)
+                        EmulatorLogger.Log($"    loaded 0x{val:X} into X{rt}");
                 }
                 else // store
                 {
@@ -719,6 +727,8 @@ public static unsafe class EmulatorARM64
                         case 4: *(uint*)addr = (uint)val; break;
                         case 8: *(ulong*)addr = val; break;
                     }
+                    if (EmulatorLogger.IsEnabled)
+                        EmulatorLogger.Log($"    stored 0x{val:X} from X{rt}");
                 }
                 ctx->Pc += 4;
                 return true;
@@ -768,7 +778,7 @@ public static unsafe class EmulatorARM64
             if ((instr & 0x3B000000) == 0x18000000)
             {
                 int imm19 = (int)(instr >> 5) & 0x7FFFF;
-                long offset = ((long)(imm19 << 45)) >> 43;
+                long offset = (((long)imm19 << 45) >> 43);
                 ulong addr = (ulong)((long)ctx->Pc + offset);
 
                 if (size == 0) WriteW(ctx, rt, *(uint*)addr);

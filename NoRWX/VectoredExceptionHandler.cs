@@ -8,6 +8,11 @@ public static unsafe class VectoredExceptionHandler
 {
     private delegate uint ExceptionHandlerDelegate(ref EXCEPTION_POINTERS exceptionInfo);
 
+    private static ulong savedTebArm64; // X18 (TEB) saved on first ARM64 VEH entry
+    private static bool tebSaved;
+    private static bool arm64StackRedirected;
+    private static byte[]? arm64Stack; // Separate stack for ARM64 emulated code
+    private static GCHandle arm64StackHandle;
     private static nint vectoredExceptionHandlerHandle;
     private static nint executingCodeAddress = nint.Zero;
     private static nuint executingCodeSize = nuint.Zero;
@@ -72,6 +77,25 @@ public static unsafe class VectoredExceptionHandler
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsInCodeRegion(ulong rip) =>
         rip >= (ulong)executingCodeAddress && rip < (ulong)executingCodeAddress + executingCodeSize;
+
+    /// <summary>
+    /// UnmanagedCallersOnly entry point for VEH — required on native ARM64
+    /// to correctly handle exception resume after modifying PC.
+    /// </summary>
+    [System.Runtime.InteropServices.UnmanagedCallersOnly(
+        CallConvs = [typeof(System.Runtime.CompilerServices.CallConvStdcall)])]
+    private static uint ExceptionHandlerNative(EXCEPTION_POINTERS* pExInfo)
+    {
+        ref EXCEPTION_POINTERS exceptionInfo = ref *pExInfo;
+        uint code = *(uint*)exceptionInfo.ExceptionRecord;
+
+        if (isArm64CodeMode)
+            return ExceptionHandlerARM64(ref exceptionInfo, code);
+        else if (is32BitMode)
+            return ExceptionHandler32(ref exceptionInfo, code);
+        else
+            return ExceptionHandler64(ref exceptionInfo, code);
+    }
 
     private static uint ExceptionHandler(ref EXCEPTION_POINTERS exceptionInfo)
     {
@@ -205,28 +229,90 @@ public static unsafe class VectoredExceptionHandler
         if (!IsInCodeRegion(faultAddr))
             return EXCEPTION_CONTINUE_SEARCH;
 
-        // Build ARM64 context from the native CONTEXT
-        var arm = new EmulatorARM64.CONTEXT_ARM64();
+        // Restore X18 = TEB before each emulation.
+        // ARM64 shellcode uses X18 as scratch but reads [X18, #0x60] for PEB.
+        // Use the real TEB from NtCurrentTeb(), not the saved X18 (which might
+        // be a .NET runtime value, not the actual TEB).
+        if (!tebSaved)
+        {
+            savedTebArm64 = ThreadInformation.GetCurrentThreadGsBase();
+            tebSaved = true;
+        }
+        pX0[18] = savedTebArm64;
+
+        // Copy native CONTEXT to ARM64 context for emulation
+        EmulatorARM64.CONTEXT_ARM64 arm;
         arm.Pc = pc;
-        arm.Sp = *pSp;
         arm.Cpsr = *pCpsr;
-        // X0-X28
         ulong* armRegs = &arm.X0;
-        for (int i = 0; i < 29; i++)
-            armRegs[i] = pX0[i];
+        for (int i = 0; i < 29; i++) armRegs[i] = pX0[i];
         arm.X29 = *pFp;
         arm.X30 = *pLr;
 
-        // Emulate one instruction (single-step on ARM64)
-        if (!EmulatorARM64.Emulate(&arm, (byte*)pc))
-            return EXCEPTION_CONTINUE_SEARCH;
+        // On native ARM64, use a PRIVATE stack for the emulated code.
+        // The real process stack is shared with the .NET runtime which
+        // corrupts emulated stack data between VEH calls.
+        if (arm64Stack != null && !arm64StackRedirected)
+        {
+            byte* stackBase = (byte*)arm64StackHandle.AddrOfPinnedObject();
+            arm.Sp = (ulong)(stackBase + arm64Stack.Length) & ~0xFUL; // 16-byte aligned top
+            arm64StackRedirected = true;
+        }
+        else
+        {
+            arm.Sp = *pSp;
+        }
 
-        // Write back
+        // Emulate in a tight loop. When PC leaves the code region (external
+        // API call via BLR), call the API directly from managed code using a
+        // function pointer. This avoids VEH re-entry which crashes on native ARM64.
+        for (;;)
+        {
+            // Emulate instructions while PC is in our code region
+            while (IsInCodeRegion(arm.Pc))
+            {
+                if (!EmulatorARM64.Emulate(&arm, (byte*)arm.Pc))
+                {
+                    if (Core.EmulatorLogger.IsEnabled)
+                        Core.EmulatorLogger.Log($"ARM64 EMULATE FAILED: PC=0x{arm.Pc:X} instr=0x{*(uint*)arm.Pc:X8}");
+                    return EXCEPTION_CONTINUE_SEARCH;
+                }
+            }
+
+            // PC left the code region — the emulated code did a BLR/BR to an
+            // external API. Call it directly from managed code instead of
+            // resuming via EXCEPTION_CONTINUE_EXECUTION (which crashes on ARM64).
+            ulong apiAddr = arm.Pc;
+            ulong returnAddr = arm.X30; // LR set by BLR
+
+            if (!IsInCodeRegion(returnAddr))
+            {
+                // Return address is also outside our region — the shellcode
+                // is done (returning to caller). Write back and exit.
+                break;
+            }
+
+            if (Core.EmulatorLogger.IsEnabled)
+                Core.EmulatorLogger.Log($"ARM64 EXTERNAL CALL: API=0x{apiAddr:X} LR=0x{returnAddr:X} X0=0x{arm.X0:X}");
+
+            // Call the external API with ARM64 calling convention (X0-X7 = args, X0 = return)
+            var apiFunc = (delegate* unmanaged<ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong>)apiAddr;
+            ulong retVal = apiFunc(armRegs[0], armRegs[1], armRegs[2], armRegs[3],
+                                   armRegs[4], armRegs[5], armRegs[6], armRegs[7]);
+            armRegs[0] = retVal; // X0 = return value
+
+            // Resume emulation at the return address
+            arm.Pc = returnAddr;
+
+            // Restore X18 = TEB (API may have preserved it, but be safe)
+            armRegs[18] = savedTebArm64;
+        }
+
+        // Write back final state to native CONTEXT
         *pPc = arm.Pc;
         *pSp = arm.Sp;
         *pCpsr = arm.Cpsr;
-        for (int i = 0; i < 29; i++)
-            pX0[i] = armRegs[i];
+        for (int i = 0; i < 29; i++) pX0[i] = armRegs[i];
         *pFp = arm.X29;
         *pLr = arm.X30;
 
@@ -257,6 +343,13 @@ public static unsafe class VectoredExceptionHandler
     public static void InitializeARM64(nint codeAddr, nuint codeSize)
     {
         isArm64CodeMode = true;
+
+        // Allocate a separate stack for ARM64 emulated code.
+        // On native ARM64, the real process stack is shared with .NET runtime
+        // which corrupts emulated stack data between VEH calls.
+        arm64Stack = new byte[1024 * 1024]; // 1 MB stack
+        arm64StackHandle = GCHandle.Alloc(arm64Stack, GCHandleType.Pinned);
+
         Initialize(codeAddr, codeSize);
     }
 
@@ -294,6 +387,9 @@ public static unsafe class VectoredExceptionHandler
                 Console.WriteLine("ARM64 detected: using ACCESS_VIOLATION-based single-stepping (no hardware breakpoints).");
         }
 
+        // On native ARM64 running ARM64 code: use UnmanagedCallersOnly handler
+        // to correctly handle exception resume after modifying PC.
+        // On all other configs: managed delegate works fine (via Prism on ARM64).
         handlerDelegate = ExceptionHandler;
         handlerDelegateHandle = GCHandle.Alloc(handlerDelegate);
         var handlerPtr = Marshal.GetFunctionPointerForDelegate(handlerDelegate);
@@ -387,5 +483,9 @@ public static unsafe class VectoredExceptionHandler
         if (handlerDelegateHandle.IsAllocated)
             handlerDelegateHandle.Free();
         handlerDelegate = null;
+
+        if (arm64StackHandle.IsAllocated)
+            arm64StackHandle.Free();
+        arm64Stack = null;
     }
 }
