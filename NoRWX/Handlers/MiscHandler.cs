@@ -352,6 +352,16 @@ public static unsafe class MiscHandler
         bool hasRepne = prefix.HasRepne;
         bool isRepPrefixed = hasRep || hasRepne;
 
+        // REP with RCX=0: skip entirely
+        if (isRepPrefixed && ctx->Rcx == 0)
+        {
+            string[] n2 = { "", "", "", "", "MOVS", "MOVS", "CMPS", "CMPS",
+                          "", "", "STOS", "STOS", "LODS", "LODS", "SCAS", "SCAS" };
+            log($"REP {n2[opcode - 0xA0]} (count=0, skipped)", offs);
+            ctx->Rip += (ulong)offs;
+            return true;
+        }
+
         do
         {
             switch (opcode)
