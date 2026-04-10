@@ -57,6 +57,14 @@ NoRWX is a proof-of-concept for running position-independent x86-64 machine code
 
 ---
 
+## Building from Command Line
+
+```bash
+dotnet build NoRWX -c Debug -r win-x64 --self-contained
+```
+
+---
+
 ## Usage Example
 
 ```csharp
