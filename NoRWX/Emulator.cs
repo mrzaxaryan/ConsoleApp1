@@ -8,20 +8,32 @@ namespace NoRWX;
 
 public static unsafe class Emulator
 {
+    // Cached no-op delegate — avoids allocating a new closure on every instruction
+    private static readonly Action<string, int> _noopLog = static (_, _) => { };
+
+    // Set to true and rebuild to enable logging
+    public static bool EnableLogging = false;
+
     public static bool Emulate(ref EXCEPTION_POINTERS exceptionInfo, byte* address)
     {
         var ctx = (CONTEXT*)exceptionInfo.ContextRecord;
-        var before = RegSnapshot.FromContext(ctx);
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void Log(string mnemonic, int instrLen)
+        Action<string, int> Log;
+        if (EnableLogging)
         {
-            // Uncomment for debugging:
-            string bytes = FormatBytes(address, instrLen);
-            string instrAddr = $"0x{before.Rip:X}";
-            var afterSnap = RegSnapshot.FromContext(ctx);
-            string diff = FormatRegisterDiff(before, afterSnap);
-            Console.WriteLine($"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}");
+            var before = RegSnapshot.FromContext(ctx);
+            Log = (string mnemonic, int instrLen) =>
+            {
+                string bytes = FormatBytes(address, Math.Min(instrLen, 15));
+                string instrAddr = $"0x{before.Rip:X}";
+                var afterSnap = RegSnapshot.FromContext(ctx);
+                string diff = FormatRegisterDiff(before, afterSnap);
+                Console.WriteLine($"[{instrAddr}] [{bytes}] {mnemonic} | {(diff.Length > 0 ? " => " + diff : "")}");
+            };
+        }
+        else
+        {
+            Log = _noopLog;
         }
 
         byte opcode = *address;
@@ -145,12 +157,99 @@ public static unsafe class Emulator
             case 0xF5: case 0xF8: case 0xF9: return MiscHandler.HandleClearSetCarry(ctx, address, Log);
             case 0xFC: case 0xFD: return MiscHandler.HandleClearSetDirection(ctx, address, Log);
 
+            // === PUSHF/POPF ===
+            case 0x9C: // PUSHF
+                ctx->Rsp -= 8;
+                *(ulong*)ctx->Rsp = ctx->EFlags;
+                Log("PUSHFQ", 1);
+                ctx->Rip += 1;
+                return true;
+            case 0x9D: // POPF
+                ctx->EFlags = (uint)(*(ulong*)ctx->Rsp);
+                ctx->Rsp += 8;
+                Log("POPFQ", 1);
+                ctx->Rip += 1;
+                return true;
+
+            // === MOV moffs (A0-A3) ===
+            case 0xA0: // MOV AL, [moffs8]
+            {
+                ulong moffs = *(ulong*)(address + 1);
+                byte val = *(byte*)moffs;
+                ctx->Rax = (ctx->Rax & ~0xFFUL) | val;
+                Log("MOV AL, moffs8", 9);
+                ctx->Rip += 9;
+                return true;
+            }
+            case 0xA1: // MOV rAX, [moffs]
+            {
+                ulong moffs = *(ulong*)(address + 1);
+                ctx->Rax = *(ulong*)moffs;
+                Log("MOV RAX, moffs64", 9);
+                ctx->Rip += 9;
+                return true;
+            }
+            case 0xA2: // MOV [moffs8], AL
+            {
+                ulong moffs = *(ulong*)(address + 1);
+                *(byte*)moffs = (byte)ctx->Rax;
+                Log("MOV moffs8, AL", 9);
+                ctx->Rip += 9;
+                return true;
+            }
+            case 0xA3: // MOV [moffs], rAX
+            {
+                ulong moffs = *(ulong*)(address + 1);
+                *(ulong*)moffs = ctx->Rax;
+                Log("MOV moffs64, RAX", 9);
+                ctx->Rip += 9;
+                return true;
+            }
+
+            // === JRCXZ (E3) ===
+            case 0xE3:
+            {
+                sbyte rel8 = *(sbyte*)(address + 1);
+                ulong nextRip = ctx->Rip + 2;
+                ulong target = (ulong)((long)nextRip + rel8);
+                bool taken = ctx->Rcx == 0;
+                Log($"JRCXZ {(taken ? "TAKEN" : "NOT taken")}", 2);
+                ctx->Rip = taken ? target : nextRip;
+                return true;
+            }
+
+            // === INT imm8 (CD) ===
+            case 0xCD:
+                Log($"INT 0x{*(address + 1):X2}", 2);
+                ctx->Rip += 2;
+                return true;
+
+            // === HLT (F4) ===
+            case 0xF4:
+                Log("HLT", 1);
+                return false;
+
             // === GS prefix ===
             case 0x65: return MiscHandler.HandleGsPrefix(ctx, address, Log);
+
+            // === FS prefix (64) ===
+            case 0x64: // FS prefix - handle like GS but for FS segment
+                Log("FS prefix (skipped)", 1);
+                ctx->Rip += 1;
+                return true;
+
+            // === LOCK prefix (F0) ===
+            case 0xF0:
+                return HandleWithLockPrefix(ctx, address, Log);
 
             // === Operand-size prefix (0x66) ===
             case 0x66:
                 return HandleWithOperandSizePrefix(ctx, address, Log);
+
+            // === Address-size prefix (0x67) ===
+            case 0x67:
+                // Skip prefix and re-dispatch (address size override rarely matters in 64-bit)
+                return HandleWithAddressSizePrefix(ctx, address, Log);
 
             // === REP/REPNE prefixes ===
             case 0xF2: case 0xF3:
@@ -165,7 +264,8 @@ public static unsafe class Emulator
                 return HandleTwoByteOpcode(ctx, address, Log);
 
             default:
-                Log($"Unsupported opcode 0x{opcode:X2}", 1);
+                string fb = FormatBytes(address, 8);
+                File.AppendAllText("emulator_log.txt", $"FAIL: unsupported opcode 0x{opcode:X2} at RIP=0x{ctx->Rip:X} bytes=[{fb}]" + Environment.NewLine);
                 return false;
         }
     }
@@ -304,6 +404,56 @@ public static unsafe class Emulator
         }
     }
 
+    /// <summary>Handle instructions with LOCK prefix (F0).</summary>
+    private static bool HandleWithLockPrefix(CONTEXT* ctx, byte* ip, Action<string, int> log)
+    {
+        // LOCK prefix is transparent - ParsePrefixes skips it.
+        // All handlers re-parse from ip, so they'll see and skip the LOCK prefix.
+        byte next = *(ip + 1);
+        if ((next & 0xF0) == 0x40) return HandleWithRexPrefix(ctx, ip, log);
+        if (next == 0x0F) return HandleTwoByteOpcode(ctx, ip, log);
+
+        // Dispatch based on the opcode after LOCK
+        switch (next)
+        {
+            case 0x00: case 0x01: return ArithmeticHandler.HandleAddRmR(ctx, ip, log);
+            case 0x08: case 0x09: return LogicHandler.HandleLogicRmR(ctx, ip, log);
+            case 0x20: case 0x21: return LogicHandler.HandleLogicRmR(ctx, ip, log);
+            case 0x28: case 0x29: return ArithmeticHandler.HandleSubRmR(ctx, ip, log);
+            case 0x30: case 0x31: return LogicHandler.HandleLogicRmR(ctx, ip, log);
+            case 0x80: case 0x81: case 0x83: return ArithmeticHandler.HandleGroup1(ctx, ip, log);
+            case 0x86: case 0x87: return MoveHandler.HandleXchg(ctx, ip, log);
+            case 0xFE: return ArithmeticHandler.HandleIncDec(ctx, ip, log);
+            case 0xFF: return ControlFlowHandler.HandleGroup5(ctx, ip, log);
+            case 0xF6: case 0xF7: return ArithmeticHandler.HandleGroup3(ctx, ip, log);
+            default:
+                log($"Unsupported LOCK-prefixed opcode 0x{next:X2}", 2);
+                return false;
+        }
+    }
+
+    /// <summary>Handle instructions with address-size prefix (0x67).</summary>
+    private static bool HandleWithAddressSizePrefix(CONTEXT* ctx, byte* ip, Action<string, int> log)
+    {
+        // 0x67 in 64-bit mode is handled transparently by ParsePrefixes.
+        // Most handlers call ParsePrefixes which will consume the 0x67 byte.
+        byte next = *(ip + 1);
+        if ((next & 0xF0) == 0x40) return HandleWithRexPrefix(ctx, ip, log);
+        if (next == 0x0F) return HandleTwoByteOpcode(ctx, ip, log);
+
+        switch (next)
+        {
+            case 0x89: return MoveHandler.HandleMovRmR(ctx, ip, log);
+            case 0x8B: return MoveHandler.HandleMovRRm(ctx, ip, log);
+            case 0x8D: return MoveHandler.HandleLea(ctx, ip, log);
+            case 0xA4: case 0xA5: case 0xAA: case 0xAB:
+                return MiscHandler.HandleStringOp(ctx, ip, log);
+            default:
+                log($"Unsupported 0x67-prefixed opcode 0x{next:X2}", 2);
+                return false;
+        }
+    }
+
     /// <summary>Handle instructions with REP/REPNE prefix (F2/F3).</summary>
     private static bool HandleWithRepPrefix(CONTEXT* ctx, byte* ip, Action<string, int> log)
     {
@@ -313,10 +463,16 @@ public static unsafe class Emulator
 
         switch (opcode)
         {
+            // String operations
             case 0xA4: case 0xA5: case 0xA6: case 0xA7:
             case 0xAA: case 0xAB: case 0xAC: case 0xAD:
             case 0xAE: case 0xAF:
                 return MiscHandler.HandleStringOp(ctx, ip, log);
+
+            // Two-byte opcodes with REP/REPNE prefix (SSE scalar ops, POPCNT, etc.)
+            case 0x0F:
+                return HandleTwoByteOpcode(ctx, ip, log);
+
             default:
                 log($"Unsupported REP-prefixed opcode 0x{opcode:X2}", 2);
                 return false;
@@ -377,8 +533,175 @@ public static unsafe class Emulator
             case 0xBC: case 0xBD:
                 return MiscHandler.HandleBsfBsr(ctx, ip, log);
 
-            // Multi-byte NOP (0F 1F)
-            case 0x1F:
+            // Multi-byte NOP (0F 1F) and other NOP forms (0F 18-1E)
+            case >= 0x18 and <= 0x1F:
+                return MiscHandler.HandleMultiByteNop(ctx, ip, log);
+
+            // === SSE/SSE2 move operations ===
+            // MOVUPS/MOVAPS load (0F 10, 0F 28)
+            case 0x10: case 0x28:
+                return SseHandler.HandleMovXmmLoad(ctx, ip, log);
+            // MOVUPS/MOVAPS store (0F 11, 0F 29)
+            case 0x11: case 0x29:
+                return SseHandler.HandleMovXmmStore(ctx, ip, log);
+            // MOVLPS/MOVHLPS/MOVHPS/MOVLHPS (0F 12/13/16/17)
+            case 0x12: case 0x13: case 0x16: case 0x17:
+                return SseHandler.HandleMovLowHigh(ctx, ip, log);
+            // UNPCKLPS/UNPCKHPS (0F 14/15)
+            case 0x14: case 0x15:
+                return SseHandler.HandleUnpack(ctx, ip, log);
+            // MOVNTPS/MOVNTPD (0F 2B)
+            case 0x2B:
+                return SseHandler.HandleMovnt(ctx, ip, log);
+            // MOVMSKPS/MOVMSKPD (0F 50)
+            case 0x50:
+                return SseHandler.HandleMovmskps(ctx, ip, log);
+            // MOVD/MOVQ to XMM (0F 6E)
+            case 0x6E:
+                return SseHandler.HandleMovdToXmm(ctx, ip, log);
+            // MOVDQA/MOVQ load (0F 6F)
+            case 0x6F:
+                return SseHandler.HandleMovdqLoad(ctx, ip, log);
+            // PSHUFD/PSHUFHW/PSHUFLW (0F 70)
+            case 0x70:
+                return SseHandler.HandlePshufd(ctx, ip, log);
+            // MOVD/MOVQ from XMM (0F 7E)
+            case 0x7E:
+                return SseHandler.HandleMovdFromXmm(ctx, ip, log);
+            // MOVDQA/MOVDQU store (0F 7F)
+            case 0x7F:
+                return SseHandler.HandleMovdqStore(ctx, ip, log);
+
+            // === SSE arithmetic ===
+            // SQRTPS/ADDPS/MULPS/SUBPS/MINPS/DIVPS/MAXPS (0F 51-5F)
+            case >= 0x51 and <= 0x5F:
+                if (op2 == 0x54 || op2 == 0x55 || op2 == 0x56 || op2 == 0x57)
+                    return SseHandler.HandleSseLogic(ctx, ip, log); // ANDPS/ANDNPS/ORPS/XORPS
+                if (op2 == 0x5A || op2 == 0x5B)
+                    return SseHandler.HandleMovXmmLoad(ctx, ip, log); // CVTPS2PD etc - treat as move stub
+                return SseHandler.HandleSseArith(ctx, ip, log);
+            // UCOMISS/UCOMISD/COMISS/COMISD (0F 2E/2F)
+            case 0x2E: case 0x2F:
+                return SseHandler.HandleUcomisd(ctx, ip, log);
+            // CVTSI2SS/CVTSI2SD (0F 2A)
+            case 0x2A:
+                return SseHandler.HandleCvtIntToFloat(ctx, ip, log);
+            // CVTTSS2SI/CVTTSD2SI (0F 2C) / CVTSS2SI/CVTSD2SI (0F 2D)
+            case 0x2C: case 0x2D:
+                return SseHandler.HandleCvtFloatToInt(ctx, ip, log);
+            // CMPPS/CMPPD (0F C2)
+            case 0xC2:
+                return SseHandler.HandleCmpps(ctx, ip, log);
+            // MOVNTI (0F C3)
+            case 0xC3:
+                return SseHandler.HandleMovnt(ctx, ip, log);
+            // SHUFPS/SHUFPD (0F C6)
+            case 0xC6:
+                return SseHandler.HandleShufps(ctx, ip, log);
+            // LDMXCSR/STMXCSR/FXSAVE/FXRSTOR/FENCE (0F AE)
+            case 0xAE:
+                return SseHandler.HandleFxsaveLdmxcsr(ctx, ip, log);
+            // MOVNTDQ (0F E7)
+            case 0xE7:
+                return SseHandler.HandleMovnt(ctx, ip, log);
+            // PXOR (0F EF)
+            case 0xEF:
+                return SseHandler.HandleXorXmm(ctx, ip, log);
+
+            // === SSE2 packed integer ops (stubs - advance RIP correctly) ===
+            case >= 0x60 and <= 0x6D: // PUNPCK*, PACKSS*, PCMPGT*
+            case >= 0x74 and <= 0x76: // PCMPEQ*
+            case >= 0xD0 and <= 0xDF: // PADD*, PSUB*, PMULL*, etc.
+            case >= 0xE0 and <= 0xEE: // PAVG*, PMUL*, PSAD*, etc.
+            case >= 0xF0 and <= 0xFF: // PSUBB/W/D/Q, PADDB/W/D/Q, etc.
+            {
+                // Generic SSE2 packed op: parse ModRM and skip
+                int soffs = 0;
+                var px = InstructionDecoder.ParsePrefixes(ip, ref soffs);
+                soffs += 2; // 0F xx
+                var mm = InstructionDecoder.ParseModRM(ip, ref soffs, px.R, px.B);
+                if (mm.Mod != 0b11)
+                    InstructionDecoder.ResolveAddress(ctx, ip, ref soffs, mm.Mod, mm.Rm, px.X, px.B);
+                log($"SSE2 packed 0F {op2:X2} (stub)", soffs);
+                ctx->Rip += (ulong)soffs;
+                return true;
+            }
+
+            // === Non-SSE two-byte opcodes ===
+            // XADD (0F C0/C1)
+            case 0xC0: case 0xC1:
+                return TwoByteHandler.HandleXadd(ctx, ip, log);
+            // CMPXCHG (0F B0/B1)
+            case 0xB0: case 0xB1:
+                return TwoByteHandler.HandleCmpxchg(ctx, ip, log);
+            // SHLD (0F A4/A5)
+            case 0xA4: case 0xA5:
+                return TwoByteHandler.HandleShld(ctx, ip, log);
+            // SHRD (0F AC/AD)
+            case 0xAC: case 0xAD:
+                return TwoByteHandler.HandleShrd(ctx, ip, log);
+            // CPUID (0F A2)
+            case 0xA2:
+                return TwoByteHandler.HandleCpuid(ctx, ip, log);
+            // RDTSC (0F 31)
+            case 0x31:
+                return TwoByteHandler.HandleRdtsc(ctx, ip, log);
+            // SYSCALL (0F 05)
+            case 0x05:
+                return TwoByteHandler.HandleSyscall(ctx, ip, log);
+            // UD2 (0F 0B)
+            case 0x0B:
+                return TwoByteHandler.HandleUd2(ctx, ip, log);
+
+            // POPCNT (F3 0F B8)
+            case 0xB8:
+            {
+                // Check for F3 prefix (POPCNT) vs BSF without F3
+                int poffs = 0;
+                var px = InstructionDecoder.ParsePrefixes(ip, ref poffs);
+                if (px.HasRep)
+                    return TwoByteHandler.HandlePopcnt(ctx, ip, log);
+                // Without F3, 0F B8 is not a standard opcode
+                log($"Unsupported 0F B8 without REP", 2);
+                return false;
+            }
+
+            // PUSH/POP FS/GS (0F A0/A1/A8/A9)
+            case 0xA0: // PUSH FS
+            {
+                ctx->Rsp -= 8;
+                *(ulong*)ctx->Rsp = ctx->SegFs;
+                log("PUSH FS", 2);
+                ctx->Rip += 2;
+                return true;
+            }
+            case 0xA1: // POP FS
+            {
+                ctx->SegFs = (ushort)(*(ulong*)ctx->Rsp);
+                ctx->Rsp += 8;
+                log("POP FS", 2);
+                ctx->Rip += 2;
+                return true;
+            }
+            case 0xA8: // PUSH GS
+            {
+                ctx->Rsp -= 8;
+                *(ulong*)ctx->Rsp = ctx->SegGs;
+                log("PUSH GS", 2);
+                ctx->Rip += 2;
+                return true;
+            }
+            case 0xA9: // POP GS
+            {
+                ctx->SegGs = (ushort)(*(ulong*)ctx->Rsp);
+                ctx->Rsp += 8;
+                log("POP GS", 2);
+                ctx->Rip += 2;
+                return true;
+            }
+
+            // NOP with 0F 0D (prefetch - treat as NOP)
+            case 0x0D:
                 return MiscHandler.HandleMultiByteNop(ctx, ip, log);
 
             default:

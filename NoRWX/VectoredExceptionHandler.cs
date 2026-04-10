@@ -84,29 +84,27 @@ public static unsafe class VectoredExceptionHandler
 
         if (isOurException && IsInCodeRegion(rip))
         {
-            if (!Emulate(ref exceptionInfo, (byte*)rip))
+            // Emulate instructions in a tight loop while RIP stays in our code
+            // region. This avoids the massive overhead of returning to the OS
+            // after every single instruction (~10,000+ cycles per exception).
+            // The loop exits when RIP leaves the region (external API call)
+            // or emulation fails.
+            while (IsInCodeRegion(ctx->Rip))
             {
-                if (!isArm64Emulated)
-                    ResetHardwareBreakpoint(ctx);
-                return EXCEPTION_CONTINUE_SEARCH;
+                if (!Emulate(ref exceptionInfo, (byte*)ctx->Rip))
+                {
+                    if (!isArm64Emulated)
+                        ResetHardwareBreakpoint(ctx);
+                    return EXCEPTION_CONTINUE_SEARCH;
+                }
             }
 
-            // On ARM64 emulation, no hardware breakpoints needed:
-            // - If RIP is still in buffer, next execution attempt faults again naturally
-            // - If RIP left buffer (external call), it runs natively; when the call
-            //   returns to the buffer address, it faults again and we resume emulation
+            // RIP left the code region (external API call).
+            // Let it run natively. On native x64 set a hardware breakpoint
+            // on the return address so we resume when the call returns.
+            // On ARM64, the return into non-executable memory will fault naturally.
             if (!isArm64Emulated)
-            {
-                if (IsInCodeRegion(ctx->Rip))
-                {
-                    SetHardwareBreakpoint(ctx, (void*)ctx->Rip);
-                }
-                else
-                {
-                    // External call: set breakpoint on return address
-                    SetHardwareBreakpoint(ctx, (void*)*(ulong*)ctx->Rsp);
-                }
-            }
+                SetHardwareBreakpoint(ctx, (void*)*(ulong*)ctx->Rsp);
 
             return EXCEPTION_CONTINUE_EXECUTION;
         }
