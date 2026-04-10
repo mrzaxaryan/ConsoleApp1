@@ -18,30 +18,26 @@ public static unsafe class LogicHandler
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
-        ulong dst = InstructionDecoder.ReadRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong dst = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
         ulong src = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
 
-        int savedOffs = offs;
         ulong result = (opcode >> 3 & 0x7) switch
         {
-            1 => dst | src,   // 08/09
-            4 => dst & src,   // 20/21
-            6 => dst ^ src,   // 30/31
-            _ => dst
+            1 => dst | src, 4 => dst & src, 6 => dst ^ src, _ => dst
         };
         string mnem = (opcode >> 3 & 0x7) switch
         {
             1 => "OR", 4 => "AND", 6 => "XOR", _ => "?"
         };
 
-        offs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref offs);
-        offs++;
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, result, prefix.HasRex);
+        if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
+        else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
 
         ctx->EFlags = FlagsCalculator.SetLogicFlags(ctx->EFlags, result, operandSize);
-        log($"{mnem} r/m{operandSize}, r{operandSize}", savedOffs);
-        ctx->Rip += (ulong)savedOffs;
+        log($"{mnem} r/m{operandSize}, r{operandSize}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 

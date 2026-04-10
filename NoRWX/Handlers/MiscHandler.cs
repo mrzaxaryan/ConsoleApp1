@@ -225,7 +225,9 @@ public static unsafe class MiscHandler
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
-        ulong dst = InstructionDecoder.ReadRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong dst = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize);
         int bitIndex = (int)(RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize) % (ulong)operandSize);
 
         bool bitValue = (dst & (1UL << bitIndex)) != 0;
@@ -234,30 +236,19 @@ public static unsafe class MiscHandler
         string mnem;
         switch (opcode2)
         {
-            case 0xA3: mnem = "BT"; break; // just test
-            case 0xAB: // BTS - set bit
-                mnem = "BTS";
-                dst |= (1UL << bitIndex);
-                goto writeback;
-            case 0xB3: // BTR - reset bit
-                mnem = "BTR";
-                dst &= ~(1UL << bitIndex);
-                goto writeback;
-            case 0xBB: // BTC - complement bit
-                mnem = "BTC";
-                dst ^= (1UL << bitIndex);
-                goto writeback;
+            case 0xA3: mnem = "BT"; break;
+            case 0xAB: mnem = "BTS"; dst |= (1UL << bitIndex); break;
+            case 0xB3: mnem = "BTR"; dst &= ~(1UL << bitIndex); break;
+            case 0xBB: mnem = "BTC"; dst ^= (1UL << bitIndex); break;
             default: return false;
         }
-        log($"{mnem} r/m{operandSize}, r{operandSize}", offs);
-        ctx->Rip += (ulong)offs;
-        return true;
 
-    writeback:
-        int woffs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref woffs);
-        woffs += 2; // skip 0F xx
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref woffs, modrm, prefix.X, prefix.B, operandSize, dst, prefix.HasRex);
+        if (opcode2 != 0xA3)
+        {
+            if (isMem) InstructionDecoder.WriteMemory(addr, dst, operandSize);
+            else RegisterHelper.WriteSized(ctx, modrm.Rm, dst, operandSize);
+        }
+
         log($"{mnem} r/m{operandSize}, r{operandSize}", offs);
         ctx->Rip += (ulong)offs;
         return true;
@@ -275,9 +266,10 @@ public static unsafe class MiscHandler
         int grp = (modrm.Raw >> 3) & 7;
         if (grp < 4) return false;
 
-        int offsAfterModrm = offs;
-        ulong dst = InstructionDecoder.ReadRmOperand(ctx, ip, ref offsAfterModrm, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
-        byte imm8 = ip[offsAfterModrm++];
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong dst = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize);
+        byte imm8 = ip[offs++];
         int bitIndex = imm8 % operandSize;
 
         bool bitValue = (dst & (1UL << bitIndex)) != 0;
@@ -292,14 +284,12 @@ public static unsafe class MiscHandler
                 case 6: dst &= ~(1UL << bitIndex); break;
                 case 7: dst ^= (1UL << bitIndex); break;
             }
-            int woffs = 0;
-            InstructionDecoder.ParsePrefixes(ip, ref woffs);
-            woffs += 2;
-            InstructionDecoder.WriteRmOperand(ctx, ip, ref woffs, modrm, prefix.X, prefix.B, operandSize, dst, prefix.HasRex);
+            if (isMem) InstructionDecoder.WriteMemory(addr, dst, operandSize);
+            else RegisterHelper.WriteSized(ctx, modrm.Rm, dst, operandSize);
         }
 
-        log($"{mnems[grp]} r/m{operandSize}, {imm8}", offsAfterModrm);
-        ctx->Rip += (ulong)offsAfterModrm;
+        log($"{mnems[grp]} r/m{operandSize}, {imm8}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 

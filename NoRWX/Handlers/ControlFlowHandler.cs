@@ -175,33 +175,27 @@ public static unsafe class ControlFlowHandler
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
         int grp = (modrm.Raw >> 3) & 7;
 
-        ulong operand = InstructionDecoder.ReadRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, 64, prefix.HasRex);
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong operand = isMem ? InstructionDecoder.ReadMemory(addr, 64) : RegisterHelper.Read64(ctx, modrm.Rm);
 
         switch (grp)
         {
-            case 0: // INC r/m (32 or 64 depending on REX.W)
+            case 0: // INC r/m64
             {
-                int opSize = prefix.W ? 64 : prefix.HasOperandSize ? 16 : 32;
-                ulong val = InstructionDecoder.ReadRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, opSize, prefix.HasRex);
-                // Re-read with correct size... actually operand was read as 64. Let's re-do:
-                // This is a fallthrough issue. Let me handle INC/DEC in Group5 properly.
                 ulong result = operand + 1;
-                int woffs = 0;
-                InstructionDecoder.ParsePrefixes(ip, ref woffs);
-                woffs++;
-                InstructionDecoder.WriteRmOperand(ctx, ip, ref woffs, modrm, prefix.X, prefix.B, 64, result, prefix.HasRex);
+                if (isMem) InstructionDecoder.WriteMemory(addr, result, 64);
+                else RegisterHelper.Write64(ctx, modrm.Rm, result);
                 ctx->EFlags = FlagsCalculator.SetIncFlags(ctx->EFlags, operand, result, 64);
                 log($"INC r/m64", offs);
                 ctx->Rip += (ulong)offs;
                 return true;
             }
-            case 1: // DEC r/m
+            case 1: // DEC r/m64
             {
                 ulong result = operand - 1;
-                int woffs = 0;
-                InstructionDecoder.ParsePrefixes(ip, ref woffs);
-                woffs++;
-                InstructionDecoder.WriteRmOperand(ctx, ip, ref woffs, modrm, prefix.X, prefix.B, 64, result, prefix.HasRex);
+                if (isMem) InstructionDecoder.WriteMemory(addr, result, 64);
+                else RegisterHelper.Write64(ctx, modrm.Rm, result);
                 ctx->EFlags = FlagsCalculator.SetDecFlags(ctx->EFlags, operand, result, 64);
                 log($"DEC r/m64", offs);
                 ctx->Rip += (ulong)offs;

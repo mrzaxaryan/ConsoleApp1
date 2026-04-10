@@ -19,20 +19,18 @@ public static unsafe class MoveHandler
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
         ulong src = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
 
-        int savedOffs = offs;
-        // Need a separate pass for write to re-resolve address
-        int woffs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref woffs);
-        woffs++; // skip opcode
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref woffs, modrm, prefix.X, prefix.B, operandSize, src, prefix.HasRex);
+        if (modrm.Mod == 0b11)
+        {
+            RegisterHelper.WriteSized(ctx, modrm.Rm, src, operandSize, prefix.HasRex);
+        }
+        else
+        {
+            ulong addr = InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B);
+            InstructionDecoder.WriteMemory(addr, src, operandSize);
+        }
 
-        // Use the read pass offset for instruction length (both should match)
-        // But we need to advance past modrm+sib+disp for read too
-        if (modrm.Mod != 0b11)
-            InstructionDecoder.ResolveRmAddress(ctx, ip, ref savedOffs, modrm, prefix.X, prefix.B);
-
-        log($"MOV r/m{operandSize}, r{operandSize}", savedOffs);
-        ctx->Rip += (ulong)savedOffs;
+        log($"MOV r/m{operandSize}, r{operandSize}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 
@@ -152,20 +150,17 @@ public static unsafe class MoveHandler
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
         ulong regVal = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
-        int savedOffs = offs;
-        ulong rmVal = InstructionDecoder.ReadRmOperand(ctx, ip, ref savedOffs, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
 
-        // Write rm value to reg
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong rmVal = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
+
         RegisterHelper.WriteSized(ctx, modrm.Reg, rmVal, operandSize, prefix.HasRex);
+        if (isMem) InstructionDecoder.WriteMemory(addr, regVal, operandSize);
+        else RegisterHelper.WriteSized(ctx, modrm.Rm, regVal, operandSize, prefix.HasRex);
 
-        // Write reg value to rm
-        int woffs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref woffs);
-        woffs++;
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref woffs, modrm, prefix.X, prefix.B, operandSize, regVal, prefix.HasRex);
-
-        log($"XCHG r{operandSize}, r/m{operandSize}", savedOffs);
-        ctx->Rip += (ulong)savedOffs;
+        log($"XCHG r{operandSize}, r/m{operandSize}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 

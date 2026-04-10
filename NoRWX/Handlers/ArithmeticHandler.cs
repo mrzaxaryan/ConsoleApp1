@@ -19,21 +19,19 @@ public static unsafe class ArithmeticHandler
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
-        ulong dst = InstructionDecoder.ReadRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong dst = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
         ulong src = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
 
-        int savedOffs = offs;
         ulong result = dst + src;
 
-        // Write back (need to re-resolve address for memory operands)
-        offs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref offs);
-        offs++; // skip opcode
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, result, prefix.HasRex);
+        if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
+        else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
 
         ctx->EFlags = FlagsCalculator.SetAddFlags(ctx->EFlags, dst, src, result, operandSize);
-        log($"ADD r/m{operandSize}, r{operandSize}", savedOffs);
-        ctx->Rip += (ulong)savedOffs;
+        log($"ADD r/m{operandSize}, r{operandSize}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 
@@ -66,7 +64,7 @@ public static unsafe class ArithmeticHandler
         var prefix = InstructionDecoder.ParsePrefixes(ip, ref offs);
         byte opcode = ip[offs++];
         int operandSize = opcode == 0x04 ? 8 : prefix.OperandSize;
-        int immSize = operandSize == 64 ? 32 : operandSize; // RAX gets sign-extended imm32
+        int immSize = operandSize == 64 ? 32 : operandSize;
 
         ulong dst = RegisterHelper.ReadSized(ctx, 0, operandSize);
         long immSigned = InstructionDecoder.ReadImmediateSigned(ip, ref offs, immSize);
@@ -91,20 +89,19 @@ public static unsafe class ArithmeticHandler
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
-        ulong dst = InstructionDecoder.ReadRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong dst = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
         ulong src = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
 
-        int savedOffs = offs;
         ulong result = dst - src;
 
-        offs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref offs);
-        offs++;
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, result, prefix.HasRex);
+        if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
+        else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
 
         ctx->EFlags = FlagsCalculator.SetSubFlags(ctx->EFlags, dst, src, result, operandSize);
-        log($"SUB r/m{operandSize}, r{operandSize}", savedOffs);
-        ctx->Rip += (ulong)savedOffs;
+        log($"SUB r/m{operandSize}, r{operandSize}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 
@@ -238,15 +235,16 @@ public static unsafe class ArithmeticHandler
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
         int grp = (modrm.Raw >> 3) & 7;
 
-        // Read destination operand
-        int offsAfterModrm = offs;
-        ulong dst = InstructionDecoder.ReadRmOperand(ctx, ip, ref offsAfterModrm, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
+        // Resolve address once for memory operands
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong dst = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
 
         // Read immediate (sign-extended to operand size)
-        long immSigned = InstructionDecoder.ReadImmediateSigned(ip, ref offsAfterModrm, immSize);
+        long immSigned = InstructionDecoder.ReadImmediateSigned(ip, ref offs, immSize);
         ulong src;
         if (operandSize == 64)
-            src = (ulong)immSigned; // sign-extend to 64
+            src = (ulong)immSigned;
         else
             src = (ulong)immSigned & ((1UL << operandSize) - 1);
 
@@ -258,55 +256,31 @@ public static unsafe class ArithmeticHandler
 
         switch (grp)
         {
-            case 0: // ADD
-                result = dst + src;
-                eflags = FlagsCalculator.SetAddFlags(eflags, dst, src, result, operandSize);
-                break;
-            case 1: // OR
-                result = dst | src;
-                eflags = FlagsCalculator.SetLogicFlags(eflags, result, operandSize);
-                break;
-            case 2: // ADC
-                result = dst + src + (cf ? 1UL : 0UL);
-                eflags = FlagsCalculator.SetAddFlags(eflags, dst, src, result, operandSize, cf ? 1 : 0);
-                break;
-            case 3: // SBB
-                result = dst - src - (cf ? 1UL : 0UL);
-                eflags = FlagsCalculator.SetSubFlags(eflags, dst, src, result, operandSize, cf ? 1 : 0);
-                break;
-            case 4: // AND
-                result = dst & src;
-                eflags = FlagsCalculator.SetLogicFlags(eflags, result, operandSize);
-                break;
-            case 5: // SUB
-                result = dst - src;
-                eflags = FlagsCalculator.SetSubFlags(eflags, dst, src, result, operandSize);
-                break;
-            case 6: // XOR
-                result = dst ^ src;
-                eflags = FlagsCalculator.SetLogicFlags(eflags, result, operandSize);
-                break;
-            case 7: // CMP (no writeback)
+            case 0: result = dst + src; eflags = FlagsCalculator.SetAddFlags(eflags, dst, src, result, operandSize); break;
+            case 1: result = dst | src; eflags = FlagsCalculator.SetLogicFlags(eflags, result, operandSize); break;
+            case 2: result = dst + src + (cf ? 1UL : 0UL); eflags = FlagsCalculator.SetAddFlags(eflags, dst, src, result, operandSize, cf ? 1 : 0); break;
+            case 3: result = dst - src - (cf ? 1UL : 0UL); eflags = FlagsCalculator.SetSubFlags(eflags, dst, src, result, operandSize, cf ? 1 : 0); break;
+            case 4: result = dst & src; eflags = FlagsCalculator.SetLogicFlags(eflags, result, operandSize); break;
+            case 5: result = dst - src; eflags = FlagsCalculator.SetSubFlags(eflags, dst, src, result, operandSize); break;
+            case 6: result = dst ^ src; eflags = FlagsCalculator.SetLogicFlags(eflags, result, operandSize); break;
+            case 7: // CMP - no writeback
                 result = dst - src;
                 eflags = FlagsCalculator.SetSubFlags(eflags, dst, src, result, operandSize);
                 ctx->EFlags = eflags;
-                log($"{mnemonics[grp]} r/m{operandSize}, imm{immSize}", offsAfterModrm);
-                ctx->Rip += (ulong)offsAfterModrm;
+                log($"{mnemonics[grp]} r/m{operandSize}, imm{immSize}", offs);
+                ctx->Rip += (ulong)offs;
                 return true;
-            default:
-                return false;
+            default: return false;
         }
 
         ctx->EFlags = eflags;
 
         // Write back result
-        offs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref offs);
-        offs++; // skip opcode
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, result, prefix.HasRex);
+        if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
+        else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
 
-        log($"{mnemonics[grp]} r/m{operandSize}, imm{immSize}", offsAfterModrm);
-        ctx->Rip += (ulong)offsAfterModrm;
+        log($"{mnemonics[grp]} r/m{operandSize}, imm{immSize}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 
@@ -324,97 +298,56 @@ public static unsafe class ArithmeticHandler
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
         int grp = (modrm.Raw >> 3) & 7;
 
-        int offsAfterModrm = offs;
-        ulong operand = InstructionDecoder.ReadRmOperand(ctx, ip, ref offsAfterModrm, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong operand = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
 
         switch (grp)
         {
-            case 0: // TEST r/m, imm
-            case 1: // TEST r/m, imm (alternate encoding)
+            case 0: case 1: // TEST r/m, imm
             {
-                int immSize = operandSize == 64 ? 32 : operandSize;
-                long immSigned = InstructionDecoder.ReadImmediateSigned(ip, ref offsAfterModrm, immSize);
+                int immSz = operandSize == 64 ? 32 : operandSize;
+                long immSigned = InstructionDecoder.ReadImmediateSigned(ip, ref offs, immSz);
                 ulong src = operandSize == 64 ? (ulong)immSigned : (ulong)immSigned & ((1UL << operandSize) - 1);
                 ulong result = operand & src;
                 ctx->EFlags = FlagsCalculator.SetLogicFlags(ctx->EFlags, result, operandSize);
-                log($"TEST r/m{operandSize}, imm", offsAfterModrm);
-                ctx->Rip += (ulong)offsAfterModrm;
+                log($"TEST r/m{operandSize}, imm", offs);
+                ctx->Rip += (ulong)offs;
                 return true;
             }
 
             case 2: // NOT r/m
             {
                 ulong result = ~operand;
-                offs = 0;
-                InstructionDecoder.ParsePrefixes(ip, ref offs);
-                offs++;
-                InstructionDecoder.WriteRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, result, prefix.HasRex);
-                // NOT does not affect flags
-                log($"NOT r/m{operandSize}", offsAfterModrm);
-                ctx->Rip += (ulong)offsAfterModrm;
+                if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
+                else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
+                log($"NOT r/m{operandSize}", offs);
+                ctx->Rip += (ulong)offs;
                 return true;
             }
 
             case 3: // NEG r/m
             {
                 ulong result = 0 - operand;
-                offs = 0;
-                InstructionDecoder.ParsePrefixes(ip, ref offs);
-                offs++;
-                InstructionDecoder.WriteRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, result, prefix.HasRex);
+                if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
+                else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
                 ctx->EFlags = FlagsCalculator.SetSubFlags(ctx->EFlags, 0, operand, result, operandSize);
-                // CF is set if operand != 0
-                if (operand != 0)
-                    ctx->EFlags |= FlagsCalculator.CF;
-                else
-                    ctx->EFlags &= ~FlagsCalculator.CF;
-                log($"NEG r/m{operandSize}", offsAfterModrm);
-                ctx->Rip += (ulong)offsAfterModrm;
+                if (operand != 0) ctx->EFlags |= FlagsCalculator.CF;
+                else ctx->EFlags &= ~FlagsCalculator.CF;
+                log($"NEG r/m{operandSize}", offs);
+                ctx->Rip += (ulong)offs;
                 return true;
             }
 
-            case 4: // MUL r/m (unsigned)
-            {
-                HandleMul(ctx, operand, operandSize);
-                log($"MUL r/m{operandSize}", offsAfterModrm);
-                ctx->Rip += (ulong)offsAfterModrm;
-                return true;
-            }
-
-            case 5: // IMUL r/m (signed, one-operand form)
-            {
-                HandleImul1(ctx, operand, operandSize);
-                log($"IMUL r/m{operandSize}", offsAfterModrm);
-                ctx->Rip += (ulong)offsAfterModrm;
-                return true;
-            }
-
-            case 6: // DIV r/m (unsigned)
-            {
-                if (!HandleDiv(ctx, operand, operandSize))
-                {
-                    log($"DIV by zero", offsAfterModrm);
-                    return false;
-                }
-                log($"DIV r/m{operandSize}", offsAfterModrm);
-                ctx->Rip += (ulong)offsAfterModrm;
-                return true;
-            }
-
-            case 7: // IDIV r/m (signed)
-            {
-                if (!HandleIdiv(ctx, operand, operandSize))
-                {
-                    log($"IDIV by zero", offsAfterModrm);
-                    return false;
-                }
-                log($"IDIV r/m{operandSize}", offsAfterModrm);
-                ctx->Rip += (ulong)offsAfterModrm;
-                return true;
-            }
-
-            default:
-                return false;
+            case 4: HandleMul(ctx, operand, operandSize); log($"MUL r/m{operandSize}", offs); ctx->Rip += (ulong)offs; return true;
+            case 5: HandleImul1(ctx, operand, operandSize); log($"IMUL r/m{operandSize}", offs); ctx->Rip += (ulong)offs; return true;
+            case 6:
+                if (!HandleDiv(ctx, operand, operandSize)) { log($"DIV by zero", offs); return false; }
+                log($"DIV r/m{operandSize}", offs); ctx->Rip += (ulong)offs; return true;
+            case 7:
+                if (!HandleIdiv(ctx, operand, operandSize)) { log($"IDIV by zero", offs); return false; }
+                log($"IDIV r/m{operandSize}", offs); ctx->Rip += (ulong)offs; return true;
+            default: return false;
         }
     }
 
@@ -428,37 +361,25 @@ public static unsafe class ArithmeticHandler
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
         int grp = (modrm.Raw >> 3) & 7;
-        if (grp != 0 && grp != 1) return false; // /0=INC, /1=DEC
+        if (grp != 0 && grp != 1) return false;
 
-        int offsAfterModrm = offs;
-        ulong operand = InstructionDecoder.ReadRmOperand(ctx, ip, ref offsAfterModrm, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong operand = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
 
         ulong result;
-        if (grp == 0)
-        {
-            result = operand + 1;
-            ctx->EFlags = FlagsCalculator.SetIncFlags(ctx->EFlags, operand, result, operandSize);
-        }
-        else
-        {
-            result = operand - 1;
-            ctx->EFlags = FlagsCalculator.SetDecFlags(ctx->EFlags, operand, result, operandSize);
-        }
+        if (grp == 0) { result = operand + 1; ctx->EFlags = FlagsCalculator.SetIncFlags(ctx->EFlags, operand, result, operandSize); }
+        else { result = operand - 1; ctx->EFlags = FlagsCalculator.SetDecFlags(ctx->EFlags, operand, result, operandSize); }
 
-        offs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref offs);
-        offs++;
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, result, prefix.HasRex);
+        if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
+        else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
 
-        log(grp == 0 ? $"INC r/m{operandSize}" : $"DEC r/m{operandSize}", offsAfterModrm);
-        ctx->Rip += (ulong)offsAfterModrm;
+        log(grp == 0 ? $"INC r/m{operandSize}" : $"DEC r/m{operandSize}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 
-    /// <summary>
-    /// Group 2: C0/C1/D0/D1/D2/D3 - Shift/rotate operations
-    /// SHL, SHR, SAR, ROL, ROR, RCL, RCR
-    /// </summary>
+    /// <summary>Group 2: C0/C1/D0/D1/D2/D3 - Shift/rotate operations</summary>
     public static bool HandleGroup2Shift(CONTEXT* ctx, byte* ip, Action<string, int> log)
     {
         int offs = 0;
@@ -466,11 +387,11 @@ public static unsafe class ArithmeticHandler
         byte opcode = ip[offs++];
 
         int operandSize;
-        bool byImm8 = false, byCL = false, by1 = false;
+        bool byCL = false, by1 = false;
         switch (opcode)
         {
-            case 0xC0: operandSize = 8; byImm8 = true; break;
-            case 0xC1: operandSize = prefix.OperandSize; byImm8 = true; break;
+            case 0xC0: operandSize = 8; break;
+            case 0xC1: operandSize = prefix.OperandSize; break;
             case 0xD0: operandSize = 8; by1 = true; break;
             case 0xD1: operandSize = prefix.OperandSize; by1 = true; break;
             case 0xD2: operandSize = 8; byCL = true; break;
@@ -481,13 +402,14 @@ public static unsafe class ArithmeticHandler
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
         int sub = (modrm.Raw >> 3) & 7;
 
-        int offsAfterModrm = offs;
-        ulong value = InstructionDecoder.ReadRmOperand(ctx, ip, ref offsAfterModrm, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
+        bool isMem = modrm.Mod != 0b11;
+        ulong addr = isMem ? InstructionDecoder.ResolveAddress(ctx, ip, ref offs, modrm.Mod, modrm.Rm, prefix.X, prefix.B) : 0;
+        ulong value = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
 
         byte count;
         if (by1) count = 1;
         else if (byCL) count = (byte)(ctx->Rcx & (operandSize == 64 ? 0x3FUL : 0x1FUL));
-        else { count = ip[offsAfterModrm++]; count &= (byte)(operandSize == 64 ? 0x3F : 0x1F); }
+        else { count = ip[offs++]; count &= (byte)(operandSize == 64 ? 0x3F : 0x1F); }
 
         ulong result;
         int bits = operandSize;
@@ -497,11 +419,10 @@ public static unsafe class ArithmeticHandler
         {
             case 0: opName = "ROL"; result = (value << count) | (value >> (bits - count)); break;
             case 1: opName = "ROR"; result = (value >> count) | (value << (bits - count)); break;
-            case 2: opName = "RCL"; result = value; /* simplified */ break; // TODO: full RCL
-            case 3: opName = "RCR"; result = value; /* simplified */ break; // TODO: full RCR
-            case 4: opName = "SHL"; result = value << count; break;
+            case 2: opName = "RCL"; result = value; break;
+            case 3: opName = "RCR"; result = value; break;
+            case 4: case 6: opName = "SHL"; result = value << count; break;
             case 5: opName = "SHR"; result = value >> count; break;
-            case 6: opName = "SHL"; result = value << count; break; // SAL = SHL
             case 7:
                 opName = "SAR";
                 result = operandSize switch
@@ -513,40 +434,25 @@ public static unsafe class ArithmeticHandler
                     _ => value
                 };
                 break;
-            default:
-                return false;
+            default: return false;
         }
 
-        // Write back
-        offs = 0;
-        InstructionDecoder.ParsePrefixes(ip, ref offs);
-        offs++;
-        InstructionDecoder.WriteRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, result, prefix.HasRex);
+        if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
+        else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
 
-        // Flags for shifts (simplified - CF, OF, SF, ZF, PF)
         if (count > 0 && sub >= 4)
         {
             ctx->EFlags = FlagsCalculator.SetLogicFlags(ctx->EFlags, result, operandSize);
-            // CF = last bit shifted out
-            if (sub == 4 || sub == 6) // SHL
-            {
-                ulong mask = 1UL << (bits - count);
-                ctx->EFlags = (value & mask) != 0 ? ctx->EFlags | FlagsCalculator.CF : ctx->EFlags & ~FlagsCalculator.CF;
-            }
-            else if (sub == 5) // SHR
-            {
-                ulong mask = 1UL << (count - 1);
-                ctx->EFlags = (value & mask) != 0 ? ctx->EFlags | FlagsCalculator.CF : ctx->EFlags & ~FlagsCalculator.CF;
-            }
-            else if (sub == 7) // SAR
-            {
-                ulong mask = 1UL << (count - 1);
-                ctx->EFlags = (value & mask) != 0 ? ctx->EFlags | FlagsCalculator.CF : ctx->EFlags & ~FlagsCalculator.CF;
-            }
+            if (sub == 4 || sub == 6)
+            { ulong mask = 1UL << (bits - count); ctx->EFlags = (value & mask) != 0 ? ctx->EFlags | FlagsCalculator.CF : ctx->EFlags & ~FlagsCalculator.CF; }
+            else if (sub == 5)
+            { ulong mask = 1UL << (count - 1); ctx->EFlags = (value & mask) != 0 ? ctx->EFlags | FlagsCalculator.CF : ctx->EFlags & ~FlagsCalculator.CF; }
+            else if (sub == 7)
+            { ulong mask = 1UL << (count - 1); ctx->EFlags = (value & mask) != 0 ? ctx->EFlags | FlagsCalculator.CF : ctx->EFlags & ~FlagsCalculator.CF; }
         }
 
-        log($"{opName} r/m{operandSize}, {count}", offsAfterModrm);
-        ctx->Rip += (ulong)offsAfterModrm;
+        log($"{opName} r/m{operandSize}, {count}", offs);
+        ctx->Rip += (ulong)offs;
         return true;
     }
 
@@ -566,12 +472,11 @@ public static unsafe class ArithmeticHandler
         long result = dst * src;
         RegisterHelper.WriteSized(ctx, modrm.Reg, (ulong)result, operandSize);
 
-        // CF=OF=1 if result doesn't fit in operandSize
         bool overflow = operandSize switch
         {
             16 => result != (short)result,
             32 => result != (int)result,
-            _ => false // 64-bit overflow requires 128-bit check, simplified
+            _ => false
         };
         ctx->EFlags = overflow
             ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
@@ -582,7 +487,7 @@ public static unsafe class ArithmeticHandler
         return true;
     }
 
-    /// <summary>IMUL r, r/m, imm8 (6B) or IMUL r, r/m, imm32 (69) - three-operand form</summary>
+    /// <summary>IMUL r, r/m, imm8 (6B) or IMUL r, r/m, imm32 (69)</summary>
     public static bool HandleImul3(CONTEXT* ctx, byte* ip, Action<string, int> log)
     {
         int offs = 0;
@@ -606,55 +511,24 @@ public static unsafe class ArithmeticHandler
         return true;
     }
 
-    // --- Internal helpers ---
+    // --- Internal helpers (MUL/IMUL1/DIV/IDIV unchanged) ---
 
     private static void HandleMul(CONTEXT* ctx, ulong operand, int operandSize)
     {
         switch (operandSize)
         {
             case 8:
-            {
-                ushort result = (ushort)((byte)ctx->Rax * (byte)operand);
-                ctx->Rax = (ctx->Rax & ~0xFFFFUL) | result;
-                bool overflow = (result >> 8) != 0;
-                ctx->EFlags = overflow
-                    ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
-                    : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF);
-                break;
-            }
+            { ushort r = (ushort)((byte)ctx->Rax * (byte)operand); ctx->Rax = (ctx->Rax & ~0xFFFFUL) | r;
+              ctx->EFlags = (r >> 8) != 0 ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF); break; }
             case 16:
-            {
-                uint result = (uint)((ushort)ctx->Rax * (ushort)operand);
-                ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (result & 0xFFFF);
-                ctx->Rdx = (ctx->Rdx & ~0xFFFFUL) | (result >> 16);
-                bool overflow = (result >> 16) != 0;
-                ctx->EFlags = overflow
-                    ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
-                    : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF);
-                break;
-            }
+            { uint r = (uint)((ushort)ctx->Rax * (ushort)operand); ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (r & 0xFFFF); ctx->Rdx = (ctx->Rdx & ~0xFFFFUL) | (r >> 16);
+              ctx->EFlags = (r >> 16) != 0 ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF); break; }
             case 32:
-            {
-                ulong result = (ulong)(uint)ctx->Rax * (uint)operand;
-                ctx->Rax = (uint)result;
-                ctx->Rdx = (uint)(result >> 32);
-                bool overflow = (result >> 32) != 0;
-                ctx->EFlags = overflow
-                    ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
-                    : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF);
-                break;
-            }
+            { ulong r = (ulong)(uint)ctx->Rax * (uint)operand; ctx->Rax = (uint)r; ctx->Rdx = (uint)(r >> 32);
+              ctx->EFlags = (r >> 32) != 0 ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF); break; }
             case 64:
-            {
-                UInt128 result = (UInt128)ctx->Rax * operand;
-                ctx->Rax = (ulong)result;
-                ctx->Rdx = (ulong)(result >> 64);
-                bool overflow = ctx->Rdx != 0;
-                ctx->EFlags = overflow
-                    ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
-                    : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF);
-                break;
-            }
+            { UInt128 r = (UInt128)ctx->Rax * operand; ctx->Rax = (ulong)r; ctx->Rdx = (ulong)(r >> 64);
+              ctx->EFlags = ctx->Rdx != 0 ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF); break; }
         }
     }
 
@@ -663,92 +537,29 @@ public static unsafe class ArithmeticHandler
         switch (operandSize)
         {
             case 8:
-            {
-                short result = (short)((sbyte)(byte)ctx->Rax * (sbyte)(byte)operand);
-                ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)result;
-                bool overflow = result != (sbyte)result;
-                ctx->EFlags = overflow
-                    ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
-                    : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF);
-                break;
-            }
+            { short r = (short)((sbyte)(byte)ctx->Rax * (sbyte)(byte)operand); ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)r;
+              ctx->EFlags = r != (sbyte)r ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF); break; }
             case 16:
-            {
-                int result = (short)(ushort)ctx->Rax * (short)(ushort)operand;
-                ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)result;
-                ctx->Rdx = (ctx->Rdx & ~0xFFFFUL) | (ushort)(result >> 16);
-                bool overflow = result != (short)result;
-                ctx->EFlags = overflow
-                    ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
-                    : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF);
-                break;
-            }
+            { int r = (short)(ushort)ctx->Rax * (short)(ushort)operand; ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)r; ctx->Rdx = (ctx->Rdx & ~0xFFFFUL) | (ushort)(r >> 16);
+              ctx->EFlags = r != (short)r ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF); break; }
             case 32:
-            {
-                long result = (long)(int)(uint)ctx->Rax * (int)(uint)operand;
-                ctx->Rax = (uint)result;
-                ctx->Rdx = (uint)(ulong)(result >> 32);
-                bool overflow = result != (int)result;
-                ctx->EFlags = overflow
-                    ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
-                    : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF);
-                break;
-            }
+            { long r = (long)(int)(uint)ctx->Rax * (int)(uint)operand; ctx->Rax = (uint)r; ctx->Rdx = (uint)(ulong)(r >> 32);
+              ctx->EFlags = r != (int)r ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF); break; }
             case 64:
-            {
-                Int128 result = (Int128)(long)ctx->Rax * (long)operand;
-                ctx->Rax = (ulong)(long)result;
-                ctx->Rdx = (ulong)(long)(result >> 64);
-                bool overflow = result != (long)result;
-                ctx->EFlags = overflow
-                    ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF
-                    : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF);
-                break;
-            }
+            { Int128 r = (Int128)(long)ctx->Rax * (long)operand; ctx->Rax = (ulong)(long)r; ctx->Rdx = (ulong)(long)(r >> 64);
+              ctx->EFlags = r != (long)r ? ctx->EFlags | FlagsCalculator.CF | FlagsCalculator.OF : ctx->EFlags & ~(FlagsCalculator.CF | FlagsCalculator.OF); break; }
         }
     }
 
     private static bool HandleDiv(CONTEXT* ctx, ulong divisor, int operandSize)
     {
         if (divisor == 0) return false;
-
         switch (operandSize)
         {
-            case 8:
-            {
-                ushort dividend = (ushort)(ctx->Rax & 0xFFFF);
-                byte quotient = (byte)(dividend / (byte)divisor);
-                byte remainder = (byte)(dividend % (byte)divisor);
-                ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)(remainder << 8 | quotient);
-                break;
-            }
-            case 16:
-            {
-                uint dividend = (uint)((ctx->Rdx & 0xFFFF) << 16 | (ctx->Rax & 0xFFFF));
-                ushort quotient = (ushort)(dividend / (ushort)divisor);
-                ushort remainder = (ushort)(dividend % (ushort)divisor);
-                ctx->Rax = (ctx->Rax & ~0xFFFFUL) | quotient;
-                ctx->Rdx = (ctx->Rdx & ~0xFFFFUL) | remainder;
-                break;
-            }
-            case 32:
-            {
-                ulong dividend = (ctx->Rdx & 0xFFFFFFFF) << 32 | (ctx->Rax & 0xFFFFFFFF);
-                uint quotient = (uint)(dividend / (uint)divisor);
-                uint remainder = (uint)(dividend % (uint)divisor);
-                ctx->Rax = quotient;
-                ctx->Rdx = remainder;
-                break;
-            }
-            case 64:
-            {
-                UInt128 dividend = ((UInt128)ctx->Rdx << 64) | ctx->Rax;
-                ulong quotient = (ulong)(dividend / divisor);
-                ulong remainder = (ulong)(dividend % divisor);
-                ctx->Rax = quotient;
-                ctx->Rdx = remainder;
-                break;
-            }
+            case 8: { ushort d = (ushort)(ctx->Rax & 0xFFFF); ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)((byte)(d / (byte)divisor) | ((byte)(d % (byte)divisor) << 8)); break; }
+            case 16: { uint d = (uint)((ctx->Rdx & 0xFFFF) << 16 | (ctx->Rax & 0xFFFF)); ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)(d / (ushort)divisor); ctx->Rdx = (ctx->Rdx & ~0xFFFFUL) | (ushort)(d % (ushort)divisor); break; }
+            case 32: { ulong d = (ctx->Rdx & 0xFFFFFFFF) << 32 | (ctx->Rax & 0xFFFFFFFF); ctx->Rax = (uint)(d / (uint)divisor); ctx->Rdx = (uint)(d % (uint)divisor); break; }
+            case 64: { UInt128 d = ((UInt128)ctx->Rdx << 64) | ctx->Rax; ctx->Rax = (ulong)(d / divisor); ctx->Rdx = (ulong)(d % divisor); break; }
         }
         return true;
     }
@@ -756,48 +567,16 @@ public static unsafe class ArithmeticHandler
     private static bool HandleIdiv(CONTEXT* ctx, ulong divisor, int operandSize)
     {
         if (divisor == 0) return false;
-
         switch (operandSize)
         {
-            case 8:
-            {
-                short dividend = (short)(ushort)(ctx->Rax & 0xFFFF);
-                sbyte sdivisor = (sbyte)(byte)divisor;
-                sbyte quotient = (sbyte)(dividend / sdivisor);
-                sbyte remainder = (sbyte)(dividend % sdivisor);
-                ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ulong)(ushort)(byte)quotient | ((ulong)(ushort)(byte)remainder << 8);
-                break;
-            }
-            case 16:
-            {
-                int dividend = (int)((ctx->Rdx & 0xFFFF) << 16 | (ctx->Rax & 0xFFFF));
-                short sdivisor = (short)(ushort)divisor;
-                short quotient = (short)(dividend / sdivisor);
-                short remainder = (short)(dividend % sdivisor);
-                ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)quotient;
-                ctx->Rdx = (ctx->Rdx & ~0xFFFFUL) | (ushort)remainder;
-                break;
-            }
-            case 32:
-            {
-                long dividend = (long)((ctx->Rdx & 0xFFFFFFFF) << 32 | (ctx->Rax & 0xFFFFFFFF));
-                int sdivisor = (int)(uint)divisor;
-                int quotient = (int)(dividend / sdivisor);
-                int remainder = (int)(dividend % sdivisor);
-                ctx->Rax = (uint)quotient;
-                ctx->Rdx = (uint)remainder;
-                break;
-            }
-            case 64:
-            {
-                Int128 dividend = ((Int128)(long)ctx->Rdx << 64) | ctx->Rax;
-                long sdivisor = (long)divisor;
-                long quotient = (long)(dividend / sdivisor);
-                long remainder = (long)(dividend % sdivisor);
-                ctx->Rax = (ulong)quotient;
-                ctx->Rdx = (ulong)remainder;
-                break;
-            }
+            case 8: { short d = (short)(ushort)(ctx->Rax & 0xFFFF); sbyte q = (sbyte)(d / (sbyte)(byte)divisor); sbyte r = (sbyte)(d % (sbyte)(byte)divisor);
+                       ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ulong)(ushort)(byte)q | ((ulong)(ushort)(byte)r << 8); break; }
+            case 16: { int d = (int)((ctx->Rdx & 0xFFFF) << 16 | (ctx->Rax & 0xFFFF)); short q = (short)(d / (short)(ushort)divisor); short r = (short)(d % (short)(ushort)divisor);
+                        ctx->Rax = (ctx->Rax & ~0xFFFFUL) | (ushort)q; ctx->Rdx = (ctx->Rdx & ~0xFFFFUL) | (ushort)r; break; }
+            case 32: { long d = (long)((ctx->Rdx & 0xFFFFFFFF) << 32 | (ctx->Rax & 0xFFFFFFFF)); int q = (int)(d / (int)(uint)divisor); int r = (int)(d % (int)(uint)divisor);
+                        ctx->Rax = (uint)q; ctx->Rdx = (uint)r; break; }
+            case 64: { Int128 d = ((Int128)(long)ctx->Rdx << 64) | ctx->Rax; long q = (long)(d / (long)divisor); long r = (long)(d % (long)divisor);
+                        ctx->Rax = (ulong)q; ctx->Rdx = (ulong)r; break; }
         }
         return true;
     }
