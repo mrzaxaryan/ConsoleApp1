@@ -10,7 +10,7 @@ unsafe class Program
         Console.WriteLine($"Process Architecture: {processArch}");
 
         // Enable logging: None (default), Console, or File
-        Core.EmulatorLogger.Target = Core.EmulatorLogger.LogTarget.Console;
+        //Core.EmulatorLogger.Target = Core.EmulatorLogger.LogTarget.Console;
 
         switch (processArch)
         {
