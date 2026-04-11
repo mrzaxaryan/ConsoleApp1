@@ -19,7 +19,8 @@ public static class EmulatorLogger
         switch (Target)
         {
             case LogTarget.Console:
-                Console.WriteLine(message);
+                Console.Error.WriteLine(message);
+                Console.Error.Flush();
                 break;
             case LogTarget.File:
                 try { File.AppendAllText(FilePath, message + Environment.NewLine); }

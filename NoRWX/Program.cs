@@ -10,8 +10,7 @@ unsafe class Program
         Console.WriteLine($"Process Architecture: {processArch}");
 
         // Enable logging: None (default), Console, or File
-        //Core.EmulatorLogger.Target = Core.EmulatorLogger.LogTarget.Console;
-        Core.EmulatorLogger.Target = Core.EmulatorLogger.LogTarget.File;
+        Core.EmulatorLogger.Target = Core.EmulatorLogger.LogTarget.Console;
 
         switch (processArch)
         {
@@ -19,7 +18,8 @@ unsafe class Program
                 Run("windows-i386.bin", Arch.X86);
                 break;
             case System.Runtime.InteropServices.Architecture.X64:
-                Run("windows-x86_64.bin", Arch.X64);
+                Run("windows-x86_64-nosyscall.bin", Arch.X64);
+                //Run("HelloWorld.bin", Arch.X64);
                 break;
             case System.Runtime.InteropServices.Architecture.Arm64:
                 Run("windows-aarch64.bin", Arch.ARM64);

@@ -16,7 +16,6 @@ public static unsafe class VectoredExceptionHandler
     private static nint vectoredExceptionHandlerHandle;
     private static nint executingCodeAddress = nint.Zero;
     private static nuint executingCodeSize = nuint.Zero;
-    private static bool isArm64Emulated = false;
     private static bool is32BitMode = false;
     private static bool isArm64CodeMode = false;
     private static ExceptionHandlerDelegate? handlerDelegate;
@@ -115,27 +114,31 @@ public static unsafe class VectoredExceptionHandler
         ulong rip = ctx->Rip;
 
         bool isOurException = code == EXCEPTION_SINGLE_STEP
-            || (isArm64Emulated && code == EXCEPTION_ACCESS_VIOLATION);
+            || code == EXCEPTION_ACCESS_VIOLATION;
 
         if (isOurException && IsInCodeRegion(rip))
         {
-            if (isArm64Emulated)
+            while (IsInCodeRegion(ctx->Rip))
             {
-                if (!Emulate(ref exceptionInfo, (byte*)rip))
-                    return EXCEPTION_CONTINUE_SEARCH;
-            }
-            else
-            {
-                while (IsInCodeRegion(ctx->Rip))
+                if (!Emulate(ref exceptionInfo, (byte*)ctx->Rip))
                 {
-                    if (!Emulate(ref exceptionInfo, (byte*)ctx->Rip))
+                    if (Core.EmulatorLogger.IsEnabled)
                     {
-                        ResetHardwareBreakpoint(ctx);
-                        return EXCEPTION_CONTINUE_SEARCH;
+                        byte* failIp = (byte*)ctx->Rip;
+                        Core.EmulatorLogger.Log($"X64 EMULATE FAILED: RIP=0x{ctx->Rip:X} bytes=[{failIp[0]:X2} {failIp[1]:X2} {failIp[2]:X2} {failIp[3]:X2} {failIp[4]:X2} {failIp[5]:X2}]");
                     }
+                    ResetHardwareBreakpoint(ctx);
+                    return EXCEPTION_CONTINUE_SEARCH;
                 }
-                SetHardwareBreakpoint(ctx, (void*)*(ulong*)ctx->Rsp);
             }
+
+            if (Core.EmulatorLogger.IsEnabled)
+            {
+                ulong returnAddr = *(ulong*)ctx->Rsp;
+                Core.EmulatorLogger.Log($"X64 LEAVING CODE REGION: RIP=0x{ctx->Rip:X} RSP=0x{ctx->Rsp:X} RetAddr=0x{returnAddr:X} InRegion={IsInCodeRegion(returnAddr)}");
+            }
+
+            SetHardwareBreakpoint(ctx, (void*)*(ulong*)ctx->Rsp);
 
             return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -149,27 +152,19 @@ public static unsafe class VectoredExceptionHandler
         ulong eip = ctx->Eip;
 
         bool isOurException = code == EXCEPTION_SINGLE_STEP
-            || (isArm64Emulated && code == EXCEPTION_ACCESS_VIOLATION);
+            || code == EXCEPTION_ACCESS_VIOLATION;
 
         if (isOurException && IsInCodeRegion(eip))
         {
-            if (isArm64Emulated)
+            while (IsInCodeRegion(ctx->Eip))
             {
-                if (!EmulatorX86.Emulate(ctx, (byte*)eip))
-                    return EXCEPTION_CONTINUE_SEARCH;
-            }
-            else
-            {
-                while (IsInCodeRegion(ctx->Eip))
+                if (!EmulatorX86.Emulate(ctx, (byte*)(ulong)ctx->Eip))
                 {
-                    if (!EmulatorX86.Emulate(ctx, (byte*)(ulong)ctx->Eip))
-                    {
-                        ResetHardwareBreakpoint32(ctx);
-                        return EXCEPTION_CONTINUE_SEARCH;
-                    }
+                    ResetHardwareBreakpoint32(ctx);
+                    return EXCEPTION_CONTINUE_SEARCH;
                 }
-                SetHardwareBreakpoint32(ctx, (void*)(ulong)*(uint*)ctx->Esp);
             }
+            SetHardwareBreakpoint32(ctx, (void*)(ulong)*(uint*)ctx->Esp);
 
             return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -326,7 +321,7 @@ public static unsafe class VectoredExceptionHandler
         ulong rip = ctx->Rip;
 
         bool isOurException = code == EXCEPTION_SINGLE_STEP
-            || (isArm64Emulated && code == EXCEPTION_ACCESS_VIOLATION);
+            || code == EXCEPTION_ACCESS_VIOLATION;
 
         if (isOurException && IsInCodeRegion(rip))
         {
@@ -378,18 +373,6 @@ public static unsafe class VectoredExceptionHandler
         executingCodeAddress = codeAddr;
         executingCodeSize = codeSize;
 
-        // Detect ARM64 emulation
-        if (IsWow64Process2(GetCurrentProcess(), out ushort processMachine, out ushort nativeMachine))
-        {
-            isArm64Emulated = nativeMachine == 0xAA64;
-            Console.WriteLine($"Process Machine: 0x{processMachine:X4}, Native Machine: 0x{nativeMachine:X4}");
-            if (isArm64Emulated)
-                Console.WriteLine("ARM64 detected: using ACCESS_VIOLATION-based single-stepping (no hardware breakpoints).");
-        }
-
-        // On native ARM64 running ARM64 code: use UnmanagedCallersOnly handler
-        // to correctly handle exception resume after modifying PC.
-        // On all other configs: managed delegate works fine (via Prism on ARM64).
         handlerDelegate = ExceptionHandler;
         handlerDelegateHandle = GCHandle.Alloc(handlerDelegate);
         var handlerPtr = Marshal.GetFunctionPointerForDelegate(handlerDelegate);
@@ -400,74 +383,66 @@ public static unsafe class VectoredExceptionHandler
             return;
         }
 
-        if (!isArm64Emulated)
+        // Set hardware breakpoint on code entry
+        if (is32BitMode)
         {
-            // Set hardware breakpoint on code entry
-            if (is32BitMode)
-            {
-                int size = Marshal.SizeOf<EmulatorX86.CONTEXT32>();
-                var pCtx = (EmulatorX86.CONTEXT32*)Marshal.AllocHGlobal(size);
-                pCtx->ContextFlags = CONTEXT_DEBUG_REGISTERS_32;
+            int size = Marshal.SizeOf<EmulatorX86.CONTEXT32>();
+            var pCtx = (EmulatorX86.CONTEXT32*)Marshal.AllocHGlobal(size);
+            pCtx->ContextFlags = CONTEXT_DEBUG_REGISTERS_32;
 
-                if (!GetThreadContext(GetCurrentThread(), (nint)pCtx))
-                { Console.WriteLine("GetThreadContext failed"); Marshal.FreeHGlobal((nint)pCtx); return; }
+            if (!GetThreadContext(GetCurrentThread(), (nint)pCtx))
+            { Console.WriteLine("GetThreadContext failed"); Marshal.FreeHGlobal((nint)pCtx); return; }
 
-                SetHardwareBreakpoint32(pCtx, (void*)codeAddr);
+            SetHardwareBreakpoint32(pCtx, (void*)codeAddr);
 
-                if (!SetThreadContext(GetCurrentThread(), (nint)pCtx))
-                { Console.WriteLine("SetThreadContext failed."); Marshal.FreeHGlobal((nint)pCtx); return; }
+            if (!SetThreadContext(GetCurrentThread(), (nint)pCtx))
+            { Console.WriteLine("SetThreadContext failed."); Marshal.FreeHGlobal((nint)pCtx); return; }
 
-                Marshal.FreeHGlobal((nint)pCtx);
-            }
-            else
-            {
-                int size = Marshal.SizeOf<CONTEXT>();
-                CONTEXT* pCtx = (CONTEXT*)Marshal.AllocHGlobal(size);
-                pCtx->ContextFlags = CONTEXT_DEBUG_REGISTERS;
-
-                if (!GetThreadContext(GetCurrentThread(), (nint)pCtx))
-                { Console.WriteLine("GetThreadContext failed"); Marshal.FreeHGlobal((nint)pCtx); return; }
-
-                SetHardwareBreakpoint(pCtx, (void*)codeAddr);
-
-                if (!SetThreadContext(GetCurrentThread(), (nint)pCtx))
-                { Console.WriteLine("SetThreadContext failed."); Marshal.FreeHGlobal((nint)pCtx); return; }
-
-                Marshal.FreeHGlobal((nint)pCtx);
-            }
+            Marshal.FreeHGlobal((nint)pCtx);
         }
-        // ARM64 emulation: no setup needed — executing the buffer will
-        // immediately trigger ACCESS_VIOLATION, caught by our VEH
+        else
+        {
+            int size = Marshal.SizeOf<CONTEXT>();
+            CONTEXT* pCtx = (CONTEXT*)Marshal.AllocHGlobal(size);
+            pCtx->ContextFlags = CONTEXT_DEBUG_REGISTERS;
+
+            if (!GetThreadContext(GetCurrentThread(), (nint)pCtx))
+            { Console.WriteLine("GetThreadContext failed"); Marshal.FreeHGlobal((nint)pCtx); return; }
+
+            SetHardwareBreakpoint(pCtx, (void*)codeAddr);
+
+            if (!SetThreadContext(GetCurrentThread(), (nint)pCtx))
+            { Console.WriteLine("SetThreadContext failed."); Marshal.FreeHGlobal((nint)pCtx); return; }
+
+            Marshal.FreeHGlobal((nint)pCtx);
+        }
     }
 
     public static void Uninitialize()
     {
-        if (!isArm64Emulated)
+        if (is32BitMode)
         {
-            if (is32BitMode)
+            int size = Marshal.SizeOf<EmulatorX86.CONTEXT32>();
+            var pCtx = (EmulatorX86.CONTEXT32*)Marshal.AllocHGlobal(size);
+            pCtx->ContextFlags = CONTEXT_DEBUG_REGISTERS_32;
+            if (GetThreadContext(GetCurrentThread(), (nint)pCtx))
             {
-                int size = Marshal.SizeOf<EmulatorX86.CONTEXT32>();
-                var pCtx = (EmulatorX86.CONTEXT32*)Marshal.AllocHGlobal(size);
-                pCtx->ContextFlags = CONTEXT_DEBUG_REGISTERS_32;
-                if (GetThreadContext(GetCurrentThread(), (nint)pCtx))
-                {
-                    ResetHardwareBreakpoint32(pCtx);
-                    SetThreadContext(GetCurrentThread(), (nint)pCtx);
-                }
-                Marshal.FreeHGlobal((nint)pCtx);
+                ResetHardwareBreakpoint32(pCtx);
+                SetThreadContext(GetCurrentThread(), (nint)pCtx);
             }
-            else
+            Marshal.FreeHGlobal((nint)pCtx);
+        }
+        else
+        {
+            int size = Marshal.SizeOf<CONTEXT>();
+            CONTEXT* pCtx = (CONTEXT*)Marshal.AllocHGlobal(size);
+            pCtx->ContextFlags = CONTEXT_DEBUG_REGISTERS;
+            if (GetThreadContext(GetCurrentThread(), (nint)pCtx))
             {
-                int size = Marshal.SizeOf<CONTEXT>();
-                CONTEXT* pCtx = (CONTEXT*)Marshal.AllocHGlobal(size);
-                pCtx->ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                if (GetThreadContext(GetCurrentThread(), (nint)pCtx))
-                {
-                    ResetHardwareBreakpoint(pCtx);
-                    SetThreadContext(GetCurrentThread(), (nint)pCtx);
-                }
-                Marshal.FreeHGlobal((nint)pCtx);
+                ResetHardwareBreakpoint(pCtx);
+                SetThreadContext(GetCurrentThread(), (nint)pCtx);
             }
+            Marshal.FreeHGlobal((nint)pCtx);
         }
 
         if (vectoredExceptionHandlerHandle != nint.Zero)
