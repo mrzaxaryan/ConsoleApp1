@@ -15,7 +15,9 @@ public static unsafe class ArithmeticHandler
         int offs = 0;
         var prefix = InstructionDecoder.ParsePrefixes(ip, ref offs);
         byte opcode = ip[offs++];
-        int operandSize = opcode == 0x00 ? 8 : prefix.OperandSize;
+        int operandSize = (opcode == 0x00 || opcode == 0x10) ? 8 : prefix.OperandSize;
+        bool isAdc = opcode == 0x10 || opcode == 0x11;
+        int carry = isAdc && (ctx->EFlags & 1) != 0 ? 1 : 0;
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
@@ -24,68 +26,74 @@ public static unsafe class ArithmeticHandler
         ulong dst = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
         ulong src = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
 
-        ulong result = dst + src;
+        ulong result = dst + src + (ulong)carry;
 
         if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
         else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
 
-        ctx->EFlags = FlagsCalculator.SetAddFlags(ctx->EFlags, dst, src, result, operandSize);
-        log($"ADD r/m{operandSize}, r{operandSize}", offs);
+        ctx->EFlags = FlagsCalculator.SetAddFlags(ctx->EFlags, dst, src, result, operandSize, carry);
+        log(isAdc ? $"ADC r/m{operandSize}, r{operandSize}" : $"ADD r/m{operandSize}, r{operandSize}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
 
-    /// <summary>ADD r, r/m (02=8bit, 03=32/64bit)</summary>
+    /// <summary>ADD/ADC r, r/m</summary>
     public static bool HandleAddRRm(CONTEXT* ctx, byte* ip, Action<string, int> log)
     {
         int offs = 0;
         var prefix = InstructionDecoder.ParsePrefixes(ip, ref offs);
         byte opcode = ip[offs++];
-        int operandSize = opcode == 0x02 ? 8 : prefix.OperandSize;
+        int operandSize = (opcode == 0x02 || opcode == 0x12) ? 8 : prefix.OperandSize;
+        bool isAdc = opcode == 0x12 || opcode == 0x13;
+        int carry = isAdc && (ctx->EFlags & 1) != 0 ? 1 : 0;
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
         ulong dst = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
         ulong src = InstructionDecoder.ReadRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
 
-        ulong result = dst + src;
+        ulong result = dst + src + (ulong)carry;
         RegisterHelper.WriteSized(ctx, modrm.Reg, result, operandSize, prefix.HasRex);
 
-        ctx->EFlags = FlagsCalculator.SetAddFlags(ctx->EFlags, dst, src, result, operandSize);
-        log($"ADD r{operandSize}, r/m{operandSize}", offs);
+        ctx->EFlags = FlagsCalculator.SetAddFlags(ctx->EFlags, dst, src, result, operandSize, carry);
+        log(isAdc ? $"ADC r{operandSize}, r/m{operandSize}" : $"ADD r{operandSize}, r/m{operandSize}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
 
-    /// <summary>ADD AL/AX/EAX/RAX, imm (04=8bit, 05=32/64bit)</summary>
+    /// <summary>ADD/ADC AL/AX/EAX/RAX, imm</summary>
     public static bool HandleAddAccImm(CONTEXT* ctx, byte* ip, Action<string, int> log)
     {
         int offs = 0;
         var prefix = InstructionDecoder.ParsePrefixes(ip, ref offs);
         byte opcode = ip[offs++];
-        int operandSize = opcode == 0x04 ? 8 : prefix.OperandSize;
+        int operandSize = (opcode == 0x04 || opcode == 0x14) ? 8 : prefix.OperandSize;
+        bool isAdc = opcode == 0x14 || opcode == 0x15;
+        int carry = isAdc && (ctx->EFlags & 1) != 0 ? 1 : 0;
         int immSize = operandSize == 64 ? 32 : operandSize;
 
         ulong dst = RegisterHelper.ReadSized(ctx, 0, operandSize);
         long immSigned = InstructionDecoder.ReadImmediateSigned(ip, ref offs, immSize);
         ulong src = operandSize == 64 ? (ulong)immSigned : (ulong)immSigned & ((1UL << operandSize) - 1);
 
-        ulong result = dst + src;
+        ulong result = dst + src + (ulong)carry;
         RegisterHelper.WriteSized(ctx, 0, result, operandSize);
 
-        ctx->EFlags = FlagsCalculator.SetAddFlags(ctx->EFlags, dst, src, result, operandSize);
-        log($"ADD acc, imm", offs);
+        ctx->EFlags = FlagsCalculator.SetAddFlags(ctx->EFlags, dst, src, result, operandSize, carry);
+        log(isAdc ? "ADC acc, imm" : "ADD acc, imm", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
 
-    /// <summary>SUB r/m, r (28=8bit, 29=32/64bit)</summary>
+    /// <summary>SUB/SBB r/m, r</summary>
     public static bool HandleSubRmR(CONTEXT* ctx, byte* ip, Action<string, int> log)
     {
         int offs = 0;
         var prefix = InstructionDecoder.ParsePrefixes(ip, ref offs);
         byte opcode = ip[offs++];
-        int operandSize = opcode == 0x28 ? 8 : prefix.OperandSize;
+        int operandSize = (opcode == 0x28 || opcode == 0x18) ? 8 : prefix.OperandSize;
+        bool isSbb = opcode == 0x18 || opcode == 0x19;
+        int borrow = isSbb && (ctx->EFlags & 1) != 0 ? 1 : 0;
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
@@ -94,53 +102,57 @@ public static unsafe class ArithmeticHandler
         ulong dst = isMem ? InstructionDecoder.ReadMemory(addr, operandSize) : RegisterHelper.ReadSized(ctx, modrm.Rm, operandSize, prefix.HasRex);
         ulong src = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
 
-        ulong result = dst - src;
+        ulong result = dst - src - (ulong)borrow;
 
         if (isMem) InstructionDecoder.WriteMemory(addr, result, operandSize);
         else RegisterHelper.WriteSized(ctx, modrm.Rm, result, operandSize, prefix.HasRex);
 
-        ctx->EFlags = FlagsCalculator.SetSubFlags(ctx->EFlags, dst, src, result, operandSize);
-        log($"SUB r/m{operandSize}, r{operandSize}", offs);
+        ctx->EFlags = FlagsCalculator.SetSubFlags(ctx->EFlags, dst, src, result, operandSize, borrow);
+        log(isSbb ? $"SBB r/m{operandSize}, r{operandSize}" : $"SUB r/m{operandSize}, r{operandSize}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
 
-    /// <summary>SUB r, r/m (2A=8bit, 2B=32/64bit)</summary>
+    /// <summary>SUB/SBB r, r/m</summary>
     public static bool HandleSubRRm(CONTEXT* ctx, byte* ip, Action<string, int> log)
     {
         int offs = 0;
         var prefix = InstructionDecoder.ParsePrefixes(ip, ref offs);
         byte opcode = ip[offs++];
-        int operandSize = opcode == 0x2A ? 8 : prefix.OperandSize;
+        int operandSize = (opcode == 0x2A || opcode == 0x1A) ? 8 : prefix.OperandSize;
+        bool isSbb = opcode == 0x1A || opcode == 0x1B;
+        int borrow = isSbb && (ctx->EFlags & 1) != 0 ? 1 : 0;
 
         var modrm = InstructionDecoder.ParseModRM(ip, ref offs, prefix.R, prefix.B);
 
         ulong dst = RegisterHelper.ReadSized(ctx, modrm.Reg, operandSize, prefix.HasRex);
         ulong src = InstructionDecoder.ReadRmOperand(ctx, ip, ref offs, modrm, prefix.X, prefix.B, operandSize, prefix.HasRex);
 
-        ulong result = dst - src;
+        ulong result = dst - src - (ulong)borrow;
         RegisterHelper.WriteSized(ctx, modrm.Reg, result, operandSize, prefix.HasRex);
 
-        ctx->EFlags = FlagsCalculator.SetSubFlags(ctx->EFlags, dst, src, result, operandSize);
-        log($"SUB r{operandSize}, r/m{operandSize}", offs);
+        ctx->EFlags = FlagsCalculator.SetSubFlags(ctx->EFlags, dst, src, result, operandSize, borrow);
+        log(isSbb ? $"SBB r{operandSize}, r/m{operandSize}" : $"SUB r{operandSize}, r/m{operandSize}", offs);
         ctx->Rip += (ulong)offs;
         return true;
     }
 
-    /// <summary>SUB AL/AX/EAX/RAX, imm (2C=8bit, 2D=32/64bit)</summary>
+    /// <summary>SUB/SBB AL/AX/EAX/RAX, imm</summary>
     public static bool HandleSubAccImm(CONTEXT* ctx, byte* ip, Action<string, int> log)
     {
         int offs = 0;
         var prefix = InstructionDecoder.ParsePrefixes(ip, ref offs);
         byte opcode = ip[offs++];
-        int operandSize = opcode == 0x2C ? 8 : prefix.OperandSize;
+        int operandSize = (opcode == 0x2C || opcode == 0x1C) ? 8 : prefix.OperandSize;
+        bool isSbb = opcode == 0x1C || opcode == 0x1D;
+        int borrow = isSbb && (ctx->EFlags & 1) != 0 ? 1 : 0;
         int immSize = operandSize == 64 ? 32 : operandSize;
 
         ulong dst = RegisterHelper.ReadSized(ctx, 0, operandSize);
         long immSigned = InstructionDecoder.ReadImmediateSigned(ip, ref offs, immSize);
         ulong src = operandSize == 64 ? (ulong)immSigned : (ulong)immSigned & ((1UL << operandSize) - 1);
 
-        ulong result = dst - src;
+        ulong result = dst - src - (ulong)borrow;
         RegisterHelper.WriteSized(ctx, 0, result, operandSize);
 
         ctx->EFlags = FlagsCalculator.SetSubFlags(ctx->EFlags, dst, src, result, operandSize);

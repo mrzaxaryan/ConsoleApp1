@@ -70,6 +70,16 @@ public static unsafe class EmulatorX64
             case 0x02: case 0x03: return ArithmeticHandler.HandleAddRRm(ctx, address, Log);
             case 0x04: case 0x05: return ArithmeticHandler.HandleAddAccImm(ctx, address, Log);
 
+            // === ADC (handled via Group1 internally for carry) ===
+            case 0x10: case 0x11: return ArithmeticHandler.HandleAddRmR(ctx, address, Log);
+            case 0x12: case 0x13: return ArithmeticHandler.HandleAddRRm(ctx, address, Log);
+            case 0x14: case 0x15: return ArithmeticHandler.HandleAddAccImm(ctx, address, Log);
+
+            // === SBB ===
+            case 0x18: case 0x19: return ArithmeticHandler.HandleSubRmR(ctx, address, Log);
+            case 0x1A: case 0x1B: return ArithmeticHandler.HandleSubRRm(ctx, address, Log);
+            case 0x1C: case 0x1D: return ArithmeticHandler.HandleSubAccImm(ctx, address, Log);
+
             // === OR ===
             case 0x08: case 0x09: return LogicHandler.HandleLogicRmR(ctx, address, Log);
             case 0x0A: case 0x0B: return LogicHandler.HandleLogicRRm(ctx, address, Log);
@@ -301,6 +311,16 @@ public static unsafe class EmulatorX64
             case 0x08: case 0x09: return LogicHandler.HandleLogicRmR(ctx, ip, log);
             case 0x0A: case 0x0B: return LogicHandler.HandleLogicRRm(ctx, ip, log);
 
+            // ADC
+            case 0x10: case 0x11: return ArithmeticHandler.HandleAddRmR(ctx, ip, log);
+            case 0x12: case 0x13: return ArithmeticHandler.HandleAddRRm(ctx, ip, log);
+            case 0x14: case 0x15: return ArithmeticHandler.HandleAddAccImm(ctx, ip, log);
+
+            // SBB
+            case 0x18: case 0x19: return ArithmeticHandler.HandleSubRmR(ctx, ip, log);
+            case 0x1A: case 0x1B: return ArithmeticHandler.HandleSubRRm(ctx, ip, log);
+            case 0x1C: case 0x1D: return ArithmeticHandler.HandleSubAccImm(ctx, ip, log);
+
             // AND
             case 0x20: case 0x21: return LogicHandler.HandleLogicRmR(ctx, ip, log);
             case 0x22: case 0x23: return LogicHandler.HandleLogicRRm(ctx, ip, log);
@@ -379,21 +399,38 @@ public static unsafe class EmulatorX64
         // Most handlers already handle 0x66 via ParsePrefixes
         switch (opcode)
         {
-            case 0x89: return MoveHandler.HandleMovRmR(ctx, ip, log);
-            case 0x8B: return MoveHandler.HandleMovRRm(ctx, ip, log);
-            case 0xC7: return MoveHandler.HandleMovRmImm(ctx, ip, log);
-            case >= 0xB8 and <= 0xBF: return MoveHandler.HandleMovRegImm(ctx, ip, log);
-            case 0x83: case 0x81: case 0x80:
+            case 0x88: case 0x89: return MoveHandler.HandleMovRmR(ctx, ip, log);
+            case 0x8A: case 0x8B: return MoveHandler.HandleMovRRm(ctx, ip, log);
+            case 0xC6: case 0xC7: return MoveHandler.HandleMovRmImm(ctx, ip, log);
+            case >= 0xB0 and <= 0xBF: return MoveHandler.HandleMovRegImm(ctx, ip, log);
+            case 0x80: case 0x81: case 0x83:
                 return ArithmeticHandler.HandleGroup1(ctx, ip, log);
-            case 0x85: return LogicHandler.HandleTestRmR(ctx, ip, log);
-            case 0x39: return ArithmeticHandler.HandleCmpRmR(ctx, ip, log);
-            case 0x3B: return ArithmeticHandler.HandleCmpRRm(ctx, ip, log);
-            case 0x01: return ArithmeticHandler.HandleAddRmR(ctx, ip, log);
-            case 0x29: return ArithmeticHandler.HandleSubRmR(ctx, ip, log);
-            case 0x31: return LogicHandler.HandleLogicRmR(ctx, ip, log);
+            case 0x84: case 0x85: return LogicHandler.HandleTestRmR(ctx, ip, log);
+            case 0xA8: case 0xA9: return LogicHandler.HandleTestAccImm(ctx, ip, log);
+            case 0x00: case 0x01: return ArithmeticHandler.HandleAddRmR(ctx, ip, log);
+            case 0x02: case 0x03: return ArithmeticHandler.HandleAddRRm(ctx, ip, log);
+            case 0x10: case 0x11: return ArithmeticHandler.HandleAddRmR(ctx, ip, log);
+            case 0x18: case 0x19: return ArithmeticHandler.HandleSubRmR(ctx, ip, log);
+            case 0x28: case 0x29: return ArithmeticHandler.HandleSubRmR(ctx, ip, log);
+            case 0x2A: case 0x2B: return ArithmeticHandler.HandleSubRRm(ctx, ip, log);
+            case 0x38: case 0x39: return ArithmeticHandler.HandleCmpRmR(ctx, ip, log);
+            case 0x3A: case 0x3B: return ArithmeticHandler.HandleCmpRRm(ctx, ip, log);
+            case 0x08: case 0x09: case 0x20: case 0x21:
+            case 0x30: case 0x31:
+                return LogicHandler.HandleLogicRmR(ctx, ip, log);
+            case 0x0A: case 0x0B: case 0x22: case 0x23:
+            case 0x32: case 0x33:
+                return LogicHandler.HandleLogicRRm(ctx, ip, log);
+            case 0xC0: case 0xC1: case 0xD0: case 0xD1:
+            case 0xD2: case 0xD3:
+                return ArithmeticHandler.HandleGroup2Shift(ctx, ip, log);
+            case 0xF6: case 0xF7: return ArithmeticHandler.HandleGroup3(ctx, ip, log);
+            case 0xFE: return ArithmeticHandler.HandleIncDec(ctx, ip, log);
+            case 0xFF: return ControlFlowHandler.HandleGroup5(ctx, ip, log);
+            case 0x86: case 0x87: return MoveHandler.HandleXchg(ctx, ip, log);
             case 0x0F: return HandleTwoByteOpcode(ctx, ip, log);
             case 0x8D: return MoveHandler.HandleLea(ctx, ip, log);
-            case 0x90: return MiscHandler.HandleNop(ctx, ip, log); // 66 90 = 2-byte NOP
+            case 0x90: return MiscHandler.HandleNop(ctx, ip, log);
             default:
                 log($"Unsupported 0x66-prefixed opcode 0x{opcode:X2}", 2);
                 return false;

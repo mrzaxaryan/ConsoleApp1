@@ -10,7 +10,7 @@ unsafe class Program
         Console.WriteLine($"Process Architecture: {processArch}");
 
         // Enable logging: None (default), Console, or File
-        //Core.EmulatorLogger.Target = Core.EmulatorLogger.LogTarget.Console;
+        Core.EmulatorLogger.Target = Core.EmulatorLogger.LogTarget.None;
 
         switch (processArch)
         {
@@ -37,21 +37,28 @@ unsafe class Program
 
         fixed (byte* pBuffer = buffer)
         {
-            switch (arch)
+            if (arch == Arch.X64)
             {
-                case Arch.X86:
-                    VectoredExceptionHandler.Initialize32((nint)pBuffer, (nuint)buffer.Length);
-                    break;
-                case Arch.X64:
-                    VectoredExceptionHandler.Initialize((nint)pBuffer, (nuint)buffer.Length);
-                    break;
-                case Arch.ARM64:
-                    VectoredExceptionHandler.InitializeARM64((nint)pBuffer, (nuint)buffer.Length);
-                    break;
+                // x64: run shellcode in a dedicated new thread via CreateThread.
+                // Native entry (no delegate* unmanaged managed-to-unmanaged transition),
+                // isolates shellcode from the main .NET thread's stack.
+                VectoredExceptionHandler.RunInNewThread((nint)pBuffer, (nuint)buffer.Length);
             }
+            else
+            {
+                switch (arch)
+                {
+                    case Arch.X86:
+                        VectoredExceptionHandler.Initialize32((nint)pBuffer, (nuint)buffer.Length);
+                        break;
+                    case Arch.ARM64:
+                        VectoredExceptionHandler.InitializeARM64((nint)pBuffer, (nuint)buffer.Length);
+                        break;
+                }
 
-            ((delegate* unmanaged<void>)pBuffer)();
-            VectoredExceptionHandler.Uninitialize();
+                ((delegate* unmanaged<void>)pBuffer)();
+                VectoredExceptionHandler.Uninitialize();
+            }
         }
         Console.WriteLine("Execution finished.");
     }

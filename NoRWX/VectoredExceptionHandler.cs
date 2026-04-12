@@ -13,9 +13,6 @@ public static unsafe class VectoredExceptionHandler
     private static bool arm64StackRedirected;
     private static byte[]? arm64Stack; // Separate stack for ARM64 emulated code
     private static GCHandle arm64StackHandle;
-    private static bool x64StackRedirected;
-    private static nint x64StackBase = nint.Zero; // Native VirtualAlloc'd stack for x64 emulation
-    private static nuint x64StackSize = 0;
     private static nint vectoredExceptionHandlerHandle;
     private static nint executingCodeAddress = nint.Zero;
     private static nuint executingCodeSize = nuint.Zero;
@@ -29,7 +26,7 @@ public static unsafe class VectoredExceptionHandler
     private const uint EXCEPTION_CONTINUE_EXECUTION = 0xFFFFFFFF;
     private const uint EXCEPTION_CONTINUE_SEARCH = 0x0;
 
-    private const int CONTEXT_FULL = 0x10007;
+    private const int CONTEXT_FULL = 0x10000B; // x64: AMD64|CONTROL|INTEGER|FLOATING_POINT
     private const int CONTEXT_DEBUG_REGISTERS = 0x00100010;
     private const int CONTEXT_DEBUG_REGISTERS_32 = 0x00010010; // x86 CONTEXT_DEBUG_REGISTERS
 
@@ -56,15 +53,26 @@ public static unsafe class VectoredExceptionHandler
     private static extern nint GetCurrentProcess();
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern nint VirtualAlloc(nint lpAddress, nuint dwSize, uint flAllocationType, uint flProtect);
+    private static extern nint CreateThread(nint lpThreadAttributes, nuint dwStackSize, nint lpStartAddress, nint lpParameter, uint dwCreationFlags, out uint lpThreadId);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool VirtualFree(nint lpAddress, nuint dwSize, uint dwFreeType);
+    private static extern uint ResumeThread(nint hThread);
 
-    private const uint MEM_COMMIT = 0x1000;
-    private const uint MEM_RESERVE = 0x2000;
-    private const uint MEM_RELEASE = 0x8000;
-    private const uint PAGE_READWRITE = 0x04;
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(nint hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(nint hObject);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern nint GetModuleHandleA(string lpModuleName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern nint GetProcAddress(nint hModule, string lpProcName);
+
+    private const uint CREATE_SUSPENDED = 0x00000004;
+    private const uint INFINITE = 0xFFFFFFFF;
+
 
     private static void SetHardwareBreakpoint(ref EXCEPTION_POINTERS exceptionInfo, void* address)
     {
@@ -130,101 +138,65 @@ public static unsafe class VectoredExceptionHandler
         bool isOurException = code == EXCEPTION_SINGLE_STEP
             || code == EXCEPTION_ACCESS_VIOLATION;
 
+        // For execution AVs from outside our region, check if the fault target
+        // (ExceptionInformation[1]) is inside our code — this happens when a
+        // CALL/JMP from a caller (e.g. RtlUserThreadStart) tries to enter our buffer.
+        // Rewrite RIP to the target so emulation starts from the right place.
+        if (code == EXCEPTION_ACCESS_VIOLATION && !IsInCodeRegion(rip))
+        {
+            byte* exRec = (byte*)exceptionInfo.ExceptionRecord;
+            ulong faultAddr = *(ulong*)(exRec + 40);
+            if (IsInCodeRegion(faultAddr))
+            {
+                ctx->Rip = faultAddr;
+                rip = faultAddr;
+            }
+        }
+
         if (isOurException && IsInCodeRegion(rip))
         {
-            // Redirect emulated code to a private stack on first entry.
-            // The faulting thread's real stack is shared with the VEH handler
-            // and .NET runtime — shellcode SUB RSP writes would corrupt them.
-            if (x64StackBase != nint.Zero && !x64StackRedirected)
+            // Redirect emulated RSP to the stackalloc'd buffer on the shellcode
+            // thread's frame (set via RunInNewThread). Uses thread's existing stack.
+            if (x64StackBuf != null && !x64StackRedirected)
             {
-                ctx->Rsp = ((ulong)x64StackBase + (ulong)x64StackSize - 0x100) & ~0xFUL;
+                ctx->Rsp = ((ulong)x64StackBuf + (ulong)x64StackBufSize - 0x100) & ~0xFUL;
                 x64StackRedirected = true;
             }
 
-            // Tight emulation loop. When RIP leaves the code region (external
-            // API call), call the API directly from managed code instead of
-            // resuming via EXCEPTION_CONTINUE_EXECUTION. This avoids the TEB
-            // stack-range mismatch caused by our private emulated stack.
+            // Tight emulation loop with direct API calls for external functions.
             for (;;)
             {
                 while (IsInCodeRegion(ctx->Rip))
                 {
                     if (!Emulate(ref exceptionInfo, (byte*)ctx->Rip))
                     {
-                        if (Core.EmulatorLogger.IsEnabled)
-                        {
-                            byte* failIp = (byte*)ctx->Rip;
-                            Core.EmulatorLogger.Log($"X64 EMULATE FAILED: RIP=0x{ctx->Rip:X} bytes=[{failIp[0]:X2} {failIp[1]:X2} {failIp[2]:X2} {failIp[3]:X2} {failIp[4]:X2} {failIp[5]:X2}]");
-                        }
                         ResetHardwareBreakpoint(ctx);
                         return EXCEPTION_CONTINUE_SEARCH;
                     }
                 }
 
-                // RIP left the code region — emulated code did a CALL/JMP to
-                // an external API. Call it directly from managed code using a
-                // function pointer (x64 MS ABI: RCX, RDX, R8, R9 = args, RAX = return).
                 ulong apiAddr = ctx->Rip;
-                ulong returnAddr = *(ulong*)ctx->Rsp; // pushed by the emulated CALL
-
-                // Read stack args from emulated stack BEFORE popping return addr.
-                // MS x64 ABI: [RSP+8..RSP+32] = shadow space, [RSP+32..] = stack args 5+
-                // (Our RSP after emulated CALL points to return address.)
-                ulong arg5 = *(ulong*)(ctx->Rsp + 40);
-                ulong arg6 = *(ulong*)(ctx->Rsp + 48);
-                ulong arg7 = *(ulong*)(ctx->Rsp + 56);
-                ulong arg8 = *(ulong*)(ctx->Rsp + 64);
-
-                if (Core.EmulatorLogger.IsEnabled)
-                    Core.EmulatorLogger.Log($"X64 EXT CALL: API=0x{apiAddr:X} RCX=0x{ctx->Rcx:X} RDX=0x{ctx->Rdx:X} R8=0x{ctx->R8:X} R9=0x{ctx->R9:X} a5=0x{arg5:X} a6=0x{arg6:X} a7=0x{arg7:X} a8=0x{arg8:X}");
+                ulong returnAddr = *(ulong*)ctx->Rsp;
 
                 if (!IsInCodeRegion(returnAddr))
-                {
-                    // Return address is also outside our region — shellcode is
-                    // done (returning to the original caller). Exit cleanly.
                     break;
-                }
 
-                // Pop the return address off the emulated stack.
+                ulong arg5  = *(ulong*)(ctx->Rsp + 40);
+                ulong arg6  = *(ulong*)(ctx->Rsp + 48);
+                ulong arg7  = *(ulong*)(ctx->Rsp + 56);
+                ulong arg8  = *(ulong*)(ctx->Rsp + 64);
+                ulong arg9  = *(ulong*)(ctx->Rsp + 72);
+                ulong arg10 = *(ulong*)(ctx->Rsp + 80);
+                ulong arg11 = *(ulong*)(ctx->Rsp + 88);
+                ulong arg12 = *(ulong*)(ctx->Rsp + 96);
+
                 ctx->Rsp += 8;
 
-                // Intercept: write buffer directly to console. Length masked to 32-bit
-                // since some calls leave upper bits dirty on stack slot.
-                // Signature matches NtWriteFile — arg5 is IO_STATUS_BLOCK which the
-                // shellcode checks for success after the call.
-                bool intercepted = false;
-                uint len = (uint)arg7;
-                if (arg6 != 0 && len > 0 && len < 4096)
-                {
-                    try
-                    {
-                        var bytes = new byte[len];
-                        for (uint i = 0; i < len; i++) bytes[i] = ((byte*)arg6)[i];
-                        var text = System.Text.Encoding.UTF8.GetString(bytes);
-                        Console.Out.Write(text);
-                        Console.Out.Flush();
+                // Call API with 12 args — covers NtDeviceIoControlFile (10 args) etc.
+                var apiFunc = (delegate* unmanaged<ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong>)apiAddr;
+                ctx->Rax = apiFunc(ctx->Rcx, ctx->Rdx, ctx->R8, ctx->R9,
+                                   arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12);
 
-                        // Populate IO_STATUS_BLOCK: Status=0 (SUCCESS), Information=len
-                        if (arg5 != 0)
-                        {
-                            *(ulong*)arg5 = 0;          // Status = STATUS_SUCCESS
-                            *(ulong*)(arg5 + 8) = len;  // Information = bytes written
-                        }
-                        ctx->Rax = 0; // STATUS_SUCCESS — NTSTATUS return
-                        intercepted = true;
-                    }
-                    catch { }
-                }
-
-                if (!intercepted)
-                {
-                    // Call the API. Pass 8 args — first 4 in registers, rest on stack.
-                    var apiFunc = (delegate* unmanaged<ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong, ulong>)apiAddr;
-                    ulong retVal = apiFunc(ctx->Rcx, ctx->Rdx, ctx->R8, ctx->R9, arg5, arg6, arg7, arg8);
-                    ctx->Rax = retVal;
-                }
-
-                // Resume emulation at the return address.
                 ctx->Rip = returnAddr;
             }
 
@@ -233,6 +205,10 @@ public static unsafe class VectoredExceptionHandler
 
         return EXCEPTION_CONTINUE_SEARCH;
     }
+
+    private static byte* x64StackBuf = null;
+    private static int x64StackBufSize = 0;
+    private static bool x64StackRedirected;
 
     private static uint ExceptionHandler32(ref EXCEPTION_POINTERS exceptionInfo, uint code)
     {
@@ -422,6 +398,46 @@ public static unsafe class VectoredExceptionHandler
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
+    /// <summary>
+    /// Run x64 shellcode in a new dedicated thread.
+    /// The new thread starts directly at the buffer via CreateThread (native entry,
+    /// no managed-to-unmanaged transition). VEH on the new thread catches the
+    /// non-executable memory fault and emulates the shellcode. Blocks until the
+    /// shellcode thread completes.
+    /// </summary>
+    public static void RunInNewThread(nint codeAddr, nuint codeSize)
+    {
+        Initialize(codeAddr, codeSize);
+
+        // Use System.Threading.Thread so the new thread is .NET-tracked.
+        // Managed code (VEH handler, emulator, logger) running on it is safe
+        // for GC coordination.
+        var thread = new System.Threading.Thread(() =>
+        {
+            // stackalloc 1 MB on this thread's stack. VEH redirects the emulated
+            // RSP into here so shellcode stack writes avoid VEH's frame.
+            const int BufSize = 1024 * 1024;
+            byte* buf = stackalloc byte[BufSize];
+            x64StackBuf = buf;
+            x64StackBufSize = BufSize;
+            x64StackRedirected = false;
+
+            try
+            {
+                ((delegate* unmanaged<void>)codeAddr)();
+            }
+            catch { }
+
+            x64StackBuf = null;
+            x64StackBufSize = 0;
+        });
+        thread.IsBackground = false;
+        thread.Start();
+        thread.Join();
+
+        Uninitialize();
+    }
+
     /// <summary>Initialize for ARM64 code emulation.</summary>
     public static void InitializeARM64(nint codeAddr, nuint codeSize)
     {
@@ -460,21 +476,6 @@ public static unsafe class VectoredExceptionHandler
     {
         executingCodeAddress = codeAddr;
         executingCodeSize = codeSize;
-
-        // Allocate a private stack for emulated x64 code using VirtualAlloc.
-        // Isolates the emulated stack from the VEH handler and .NET managed heap —
-        // large shellcode SUB RSP writes would otherwise corrupt them.
-        if (!is32BitMode && !isArm64CodeMode)
-        {
-            x64StackSize = 1024 * 1024; // 1 MB
-            x64StackBase = VirtualAlloc(nint.Zero, x64StackSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if (x64StackBase == nint.Zero)
-            {
-                Console.WriteLine($"VirtualAlloc failed. Error: {Marshal.GetLastWin32Error()}");
-                return;
-            }
-            x64StackRedirected = false;
-        }
 
         handlerDelegate = ExceptionHandler;
         handlerDelegateHandle = GCHandle.Alloc(handlerDelegate);
@@ -565,13 +566,5 @@ public static unsafe class VectoredExceptionHandler
         if (arm64StackHandle.IsAllocated)
             arm64StackHandle.Free();
         arm64Stack = null;
-
-        if (x64StackBase != nint.Zero)
-        {
-            VirtualFree(x64StackBase, 0, MEM_RELEASE);
-            x64StackBase = nint.Zero;
-            x64StackSize = 0;
-        }
-        x64StackRedirected = false;
     }
 }
