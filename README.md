@@ -1,5 +1,13 @@
 # NoRWX: Run x86-64 Position-Independent Code in RW Memory (No Execute)
 
+![C#](https://img.shields.io/badge/C%23-239120?style=for-the-badge&logo=csharp&logoColor=white)
+![.NET](https://img.shields.io/badge/.NET-8.0-512BD4?style=for-the-badge&logo=dotnet&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
+![x86_64](https://img.shields.io/badge/x86__64-red?style=for-the-badge)
+![Security Research](https://img.shields.io/badge/Security-Research-critical?style=for-the-badge)
+![Proof of Concept](https://img.shields.io/badge/Proof%20of-Concept-blueviolet?style=for-the-badge)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
+
 [GitHub Project](https://github.com/mrzaxaryan/NoRWX)
 
 ---
@@ -98,6 +106,8 @@ static void Run(byte[] buffer)
 - This technique does not guarantee stealth. Security products may detect hardware breakpoint usage, VEH patterns, or emulator behavior.
 - Do not use to evade detection, run untrusted code, or break laws/policies.
 - Always test in isolated, offline VMs and follow responsible disclosure and research ethics.
+
+See [RESPONSIBLE_USE.md](RESPONSIBLE_USE.md) for the full responsible use policy.
 
 ---
 
